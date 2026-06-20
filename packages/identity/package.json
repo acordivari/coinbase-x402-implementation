@@ -1,0 +1,14 @@
+{
+  "name": "@agentic-payments/identity",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agentic-payments/shared": "*",
+    "jose": "^5.9.6",
+    "zod": "^3.24.1"
+  }
+}

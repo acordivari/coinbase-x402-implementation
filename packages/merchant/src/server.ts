@@ -25,6 +25,14 @@ import {
 import { buildFacilitator } from "./facilitator/index.ts";
 import type { SettleHooks } from "./facilitator/resilient.ts";
 import { MemoryOrderStore, type OrderStore } from "./order-store.ts";
+import { createMandateGate, IntentSpendLedger } from "./mandate-gate.ts";
+import { decodePaymentAuthorization } from "./x402-headers.ts";
+import type { MandateVerifier } from "@agentic-payments/identity";
+
+export interface MerchantAppOptions {
+  /** When set, /buy requires a signed Human Authorization Mandate (Phase 2). */
+  mandateVerifier?: MandateVerifier;
+}
 
 const ORDER_HEADER = "idempotency-key";
 
@@ -55,16 +63,19 @@ export interface MerchantApp {
 
 export function createMerchantApp(
   configOverride?: Partial<MerchantConfig>,
+  options: MerchantAppOptions = {},
 ): MerchantApp {
   const config = { ...loadMerchantConfig(), ...configOverride };
   assertConfigValid(config);
   const orders = new MemoryOrderStore();
   const nonceToOrder = new Map<string, string>();
+  const ledger = new IntentSpendLedger();
 
   // When settlement resolves (after the response), advance the order. This is
   // where AUTHORIZED -> SETTLED (or -> FAILED) actually happens.
   const hooks: SettleHooks = {
     onSettleSuccess: (nonce, res) => {
+      ledger.commit(nonce); // move reserved spend to committed
       const id = nonceToOrder.get(nonce.toLowerCase());
       const order = id ? orders.get(id) : undefined;
       if (!id || order?.state !== "AUTHORIZED") return;
@@ -73,6 +84,7 @@ export function createMerchantApp(
       orders.attachPayment(id, { nonce, txHash: res.transaction });
     },
     onSettleFailure: (nonce) => {
+      ledger.release(nonce); // free the cap reservation
       const id = nonceToOrder.get(nonce.toLowerCase());
       const order = id ? orders.get(id) : undefined;
       if (id && order?.state === "AUTHORIZED") orders.transition(id, "FAILED");
@@ -121,6 +133,21 @@ export function createMerchantApp(
     next();
   });
 
+  // --- Human Authorization Mandate gate (Phase 2): when a verifier is
+  // configured, every /buy must carry a signed, in-scope Intent mandate. ---
+  if (options.mandateVerifier) {
+    app.use(
+      "/buy",
+      createMandateGate({
+        verifier: options.mandateVerifier,
+        merchant: config.payTo,
+        asset: config.asset,
+        network: config.network,
+        ledger,
+      }),
+    );
+  }
+
   // --- The x402 paywall: challenges with 402, verifies on retry ---
   app.use(paymentMiddleware(buildRoutes(config), resourceServer));
 
@@ -129,7 +156,7 @@ export function createMerchantApp(
     const product = findProduct(req.params.sku ?? "");
     if (!product) return res.status(404).json({ error: "unknown sku" });
 
-    const nonce = decodeRequestNonce(req);
+    const nonce = decodePaymentAuthorization(req).nonce ?? "";
     const id = `ord_${nonce || randomUUID()}`;
     if (!orders.get(id)) {
       orders.create({
@@ -163,18 +190,6 @@ export function createMerchantApp(
   });
 
   return { app, orders, config };
-}
-
-/** Decode the EIP-3009 nonce from the request's x402 payment header. */
-function decodeRequestNonce(req: Request): string {
-  const header = req.header("X-PAYMENT") ?? req.header("PAYMENT-SIGNATURE");
-  if (!header) return "";
-  try {
-    const decoded = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
-    return decoded?.payload?.authorization?.nonce ?? "";
-  } catch {
-    return "";
-  }
 }
 
 // Boot when run directly.

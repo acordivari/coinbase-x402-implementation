@@ -21,6 +21,8 @@ export interface PurchaseOptions {
   sku: string;
   rpcUrl?: string;
   idempotencyKey?: string;
+  /** A signed Intent mandate (HAM). Required when the merchant enforces it. */
+  intentMandate?: unknown;
 }
 
 export interface PurchaseResult {
@@ -37,11 +39,29 @@ export async function runPurchase(opts: PurchaseOptions): Promise<PurchaseResult
   const payingFetch = await createPayingFetch(signer, { rpcUrl: opts.rpcUrl });
   const idempotencyKey = opts.idempotencyKey ?? randomUUID();
 
+  const mandateHeader: Record<string, string> = opts.intentMandate
+    ? {
+        "X-Authorization-Mandate": Buffer.from(
+          JSON.stringify(opts.intentMandate),
+        ).toString("base64"),
+      }
+    : {};
+
   console.log(`[agent] wallet ${signer.label} ${signer.address}`);
 
   // Optional pre-flight: peek at the quote and refuse obviously-bad ones before
   // we ever sign. (The paying fetch would otherwise pay automatically.)
-  const challenge = await fetch(`${opts.merchantUrl}/buy/${opts.sku}`);
+  const challenge = await fetch(`${opts.merchantUrl}/buy/${opts.sku}`, {
+    headers: mandateHeader,
+  });
+  // The merchant gates on a Human Authorization Mandate: a 401/403 here means
+  // the mandate is missing or out of scope — fail fast with a clear message.
+  if (challenge.status === 401 || challenge.status === 403) {
+    const detail = await challenge.json().catch(() => ({}));
+    throw new Error(
+      `merchant rejected authorization (HTTP ${challenge.status}): ${JSON.stringify(detail)}`,
+    );
+  }
   if (challenge.status === 402) {
     const header = challenge.headers.get("PAYMENT-REQUIRED");
     if (header) {
@@ -66,7 +86,7 @@ export async function runPurchase(opts: PurchaseOptions): Promise<PurchaseResult
 
   const res = await payingFetch(`${opts.merchantUrl}/buy/${opts.sku}`, {
     method: "GET",
-    headers: { "Idempotency-Key": idempotencyKey },
+    headers: { "Idempotency-Key": idempotencyKey, ...mandateHeader },
   });
 
   const body = (await res.json().catch(() => ({}))) as {

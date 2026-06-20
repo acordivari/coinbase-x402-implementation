@@ -89,7 +89,8 @@ export const PaymentMandate = z.object({
 });
 export type PaymentMandate = z.infer<typeof PaymentMandate>;
 
-function lineItemsTotal(items: readonly CartItem[]): bigint {
+/** Sum of unitPrice * quantity across cart line items (atomic USDC). */
+export function cartItemsTotal(items: readonly CartItem[]): bigint {
   return items.reduce(
     (acc, it) => acc + BigInt(it.unitPrice) * BigInt(it.quantity),
     0n,
@@ -106,7 +107,7 @@ export function validateCartAgainstIntent(
   intent: IntentMandate,
   nowSeconds: number,
 ): ValidationResult {
-  const computed = lineItemsTotal(cart.items);
+  const computed = cartItemsTotal(cart.items);
   const allowed = new Set(intent.scope.allowedCategories);
   const offendingCategories = cart.items
     .map((i) => i.category)
