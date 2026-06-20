@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/buyer.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "start": "tsx src/buyer.ts"

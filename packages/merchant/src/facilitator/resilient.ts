@@ -64,6 +64,16 @@ export class ResilientFacilitatorClient implements FacilitatorClient {
     this.hooks = opts.hooks ?? {};
   }
 
+  /** The settlement result for an already-settled nonce, if any. */
+  getSettlement(nonce: string): SettleResponse | undefined {
+    return this.settled.get(nonce.toLowerCase());
+  }
+
+  /** Nonces with a cached settlement (debug/inspection). */
+  settledNonces(): string[] {
+    return [...this.settled.keys()];
+  }
+
   verify(
     payload: PaymentPayload,
     requirements: PaymentRequirements,

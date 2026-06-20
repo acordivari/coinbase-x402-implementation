@@ -24,10 +24,9 @@ export interface MerchantConfig {
   settleBaseDelayMs: number;
 }
 
-function required(name: string, value: string | undefined): string {
-  if (!value) throw new Error(`Missing required env var ${name}`);
-  return value;
-}
+/** Placeholder recipient used until a real MERCHANT_PAY_TO is supplied. */
+export const PLACEHOLDER_PAY_TO =
+  "0x000000000000000000000000000000000000dead" as const;
 
 export function loadMerchantConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -35,11 +34,7 @@ export function loadMerchantConfig(
   const mode = (env.FACILITATOR_MODE as FacilitatorMode) ?? "http";
   return {
     port: Number(env.MERCHANT_PORT ?? 4021),
-    // In mock mode we don't need a real address; default to a placeholder.
-    payTo: (mode === "mock"
-      ? (env.MERCHANT_PAY_TO ?? "0x000000000000000000000000000000000000dEaD")
-      : required("MERCHANT_PAY_TO", env.MERCHANT_PAY_TO)
-    ).toLowerCase() as `0x${string}`,
+    payTo: (env.MERCHANT_PAY_TO ?? PLACEHOLDER_PAY_TO).toLowerCase() as `0x${string}`,
     network: X402_NETWORK,
     asset: USDC_ADDRESS,
     facilitatorMode: mode,
@@ -47,4 +42,16 @@ export function loadMerchantConfig(
     settleMaxAttempts: Number(env.SETTLE_MAX_ATTEMPTS ?? 4),
     settleBaseDelayMs: Number(env.SETTLE_BASE_DELAY_MS ?? 250),
   };
+}
+
+/**
+ * Validate a fully-resolved config (after overrides). The live HTTP facilitator
+ * settles real USDC, so it must have a real recipient — fail fast otherwise.
+ */
+export function assertConfigValid(config: MerchantConfig): void {
+  if (config.facilitatorMode === "http" && config.payTo === PLACEHOLDER_PAY_TO) {
+    throw new Error(
+      "MERCHANT_PAY_TO is required for live (http) facilitator mode — refusing to settle to the placeholder address",
+    );
+  }
 }
