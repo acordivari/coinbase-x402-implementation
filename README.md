@@ -10,6 +10,25 @@ authorized this agent to spend, and within what scope?**
 > faucet test USDC. The agent signs with a headless **Coinbase CDP Server
 > Wallet** (or a throwaway viem key) — your MetaMask is never connected.
 
+## 🏁 Milestone — first live settlement (2026-06-20)
+
+The agent completed its first **real, on-chain x402 payment** on Base Sepolia:
+the agent received an HTTP `402`, signed an EIP-3009 USDC authorization, and the
+live facilitator submitted the transfer — gasless for the agent. The order ledger
+walked the full state machine `CREATED → QUOTED → AUTHORIZED → SETTLING → SETTLED`.
+
+| | |
+|---|---|
+| **Item** | Allergy Relief 24-hr — **1.5 USDC** |
+| **Tx** | [`0x7f23b8a5…43ab9e`](https://sepolia.basescan.org/tx/0x7f23b8a593d831fafd287389609f5655bbd1790dd199f78caeec38696243ab9e) |
+| **From → To** | agent `0x57dfD786…092aB4` → merchant `0xCb6700f8…406bAe` |
+| **Network** | Base Sepolia (`eip155:84532`), block `43124612` |
+| **Path** | local viem signer + live `x402.org` facilitator (mandate enforcement off for this payment-rail run) |
+
+Reproduce: `npm run setup:local` → fund the printed address → `npm run merchant`
++ `npm run agent allergy-relief-24`. _Next live milestone: the same settlement
+gated by a signed Human Authorization Mandate._
+
 ## Docs
 
 - **[Architecture & Decisions](docs/ARCHITECTURE.md)** — the product-owner's
