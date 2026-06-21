@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "merchant": "tsx packages/merchant/src/server.ts",
     "agent": "tsx packages/agent/src/buyer.ts",
-    "console": "tsx apps/console/src/server.ts"
+    "console": "tsx apps/console/src/server.ts",
+    "setup:live": "tsx packages/agent/src/setup-live.ts"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

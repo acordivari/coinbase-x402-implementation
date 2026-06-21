@@ -94,13 +94,20 @@ npm run typecheck # tsc --noEmit, strict
 - ✅ **Phase 4** — docs ([architecture](docs/ARCHITECTURE.md) +
   [HAM spec](docs/HAM-PROTOCOL.md)), edge-case tests, `swappable-seams` skill
 
-## Required to run the live testnet path (Phase 1)
+## Live Base Sepolia path
 
-All free; none touch a real wallet. See `.env.example`.
+All free; testnet only. The offline demo/tests need none of this
+(`FACILITATOR_MODE=mock`).
 
-1. **CDP API key** — create at the Coinbase Developer Platform portal
-   (`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET`).
-2. **Test USDC** — fund the printed agent wallet from `https://faucet.circle.com`
-   (Base Sepolia). No ETH needed (gasless EIP-3009).
-
-The offline test + demo path needs none of the above (`FACILITATOR_MODE=mock`).
+1. **CDP API key** — create at the Coinbase Developer Platform portal, put
+   `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET` in `.env`.
+2. **Set up wallets + faucet** (turnkey):
+   ```bash
+   npm run setup:live
+   ```
+   Creates the agent + merchant CDP Server Wallets, pulls testnet USDC from the
+   CDP faucet, and prints the `MERCHANT_PAY_TO` + the exact run commands. (No ETH
+   needed — settlement is gasless EIP-3009; the facilitator submits.)
+3. **Run live:** `FACILITATOR_MODE=http WALLET_MODE=cdp` for the merchant +
+   agent, as printed by the setup script. Track wallets on
+   `https://sepolia.basescan.org`.
