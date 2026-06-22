@@ -3,7 +3,7 @@
 A working, testnet-only sandbox for **agent-initiated payments** over the
 [x402 protocol](https://docs.cdp.coinbase.com/x402/welcome), with a research
 layer that answers the question underneath agentic commerce: **which human
-authorized this agent to spend, and within what scope?**
+authorized this agent to spend, and within what scope?** Companies like Walmart, Tesla, and CVS are prioritizing infrastructure to expand agentic commerce. The sample flow below simulates the purchase of allergy medication from CVS. Funds for validation can be generated through [a faucet.](https://faucet.circle.com/)
 
 > **No real funds, no real wallet.** Everything runs on **Base Sepolia testnet**
 > against the free facilitator (`https://x402.org/facilitator`), funded with
