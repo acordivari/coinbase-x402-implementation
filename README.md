@@ -35,6 +35,26 @@ gated by a signed Human Authorization Mandate._
   "what & why": problem, concepts, decision log, safety guarantees.
 - **[HAM Protocol Spec](docs/HAM-PROTOCOL.md)** — the Human Authorization Mandate
   data model, verification rules, and threat model.
+- **[x401 + Proof VC Authorization](docs/X401-PROTOCOL.md)** — combining x401
+  identity proof with x402 payment: selective-disclosure verifiable credentials
+  (DCQL) bound to the specific payment via `transaction_data`.
+
+## x401 wallet demo — who authorized this agentic payment?
+
+```bash
+npm run demo           # PROOF_MODE=local (offline): build web + boot orchestrator
+npm run demo:web       # in another shell for live-reload dev (Vite on :5173)
+# then open http://localhost:4040
+```
+
+A browser wallet (Vite + Svelte) shows the whole handshake on screen: the human
+selectively discloses identity claims via a **DCQL** query **and** authorizes the
+exact payment (`transaction_data`) in one SD-JWT-VC presentation; the verifier
+checks the credential + nonce + payment binding, issues a signed HAM Intent, and
+the agent settles over x402. `PROOF_MODE=local` self-issues Proof-shaped
+credentials and does selective disclosure in-browser (offline); `PROOF_MODE=live`
+drives the real Proof hosted presentation against your sandbox (set
+`PROOF_CLIENT_ID`, `PROOF_LOGIN_HINT`, and a registered `PROOF_REDIRECT_URI`).
 
 ## Why TypeScript
 
@@ -60,8 +80,13 @@ packages/
               #       resilient.ts — retry + per-nonce idempotency + transaction lock
   agent/      # headless buyer agent (CDP Server Wallet -> x402 client)
   identity/   # OIDC verifier (local + Auth0) + HAM signing/verification
+  credentials/# x401 + Proof verifiable-credentials seam:
+              #   SD-JWT-VC issue/hold/present (selective disclosure) + DCQL,
+              #   transaction_data payment binding, VerifiableCredentialVerifier
+              #   (local | proof), and @proof.com/x401-node wire wrappers
 apps/
-  console/    # one-command demo: buyer + merchant consoles in the browser
+  console/    # original one-command demo: buyer + merchant consoles (OIDC + HAM)
+  wallet-demo/# Vite + Svelte x401 wallet demo (VC presentation -> HAM -> x402)
 ```
 
 ## Demo console
@@ -112,6 +137,11 @@ npm run typecheck # tsc --noEmit, strict
 - ✅ **Phase 3** — buyer/merchant UX consoles (`npm run console`)
 - ✅ **Phase 4** — docs ([architecture](docs/ARCHITECTURE.md) +
   [HAM spec](docs/HAM-PROTOCOL.md)), edge-case tests, `swappable-seams` skill
+- ✅ **Phase 5** — x401 + Proof verifiable credentials: selective-disclosure
+  (DCQL) VC presentation bound to the payment (`transaction_data`) as the
+  identity source feeding HAM; `packages/credentials`, the Svelte
+  [wallet demo](apps/wallet-demo), and the
+  [x401 protocol notes](docs/X401-PROTOCOL.md). Live Proof = `PROOF_MODE=live`.
 
 ## Live Base Sepolia path
 

@@ -19,12 +19,24 @@ export const MandateProof = z.object({
   signature: z.string(), // base64url signature over the canonical mandate
 });
 
-/** The human principal, as asserted by the OIDC IdP. */
+/** The human principal, as asserted by the OIDC IdP or an x401 VC presentation. */
 export const Principal = z.object({
-  sub: z.string().min(1), // OIDC subject
-  idp: z.string().min(1), // issuer (e.g. https://tenant.auth0.com/)
+  sub: z.string().min(1), // OIDC subject, or VC-derived stable subject
+  idp: z.string().min(1), // issuer (OIDC issuer, or VC issuer e.g. Proof)
   email: z.string().email().optional(),
   emailVerified: z.boolean().optional(),
+  // How the identity was established. Backward compatible (optional): the OIDC
+  // path may omit it; the x401 VC path sets "x401-vp" and records what the human
+  // selectively disclosed, for a non-repudiable audit trail.
+  verifiedVia: z.enum(["oidc", "x401-vp"]).optional(),
+  credential: z
+    .object({
+      id: z.string(), // e.g. proof_id_default
+      issuer: z.string(), // the VC issuer (Proof / local)
+      presentationDigest: z.string().optional(), // sha256(vp_token) for audit
+      claimsDisclosed: z.array(z.string()).optional(), // which claims were revealed
+    })
+    .optional(),
 });
 export type Principal = z.infer<typeof Principal>;
 

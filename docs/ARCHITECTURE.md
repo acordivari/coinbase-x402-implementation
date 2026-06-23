@@ -134,6 +134,9 @@ Short ADR-style log. Each is a real fork we took, with the reasoning.
 | 8 | **Authorize against the merchant's catalog price** | The gate builds the cart from **its own catalog**, not the agent's claimed amount, then checks the signed payment equals it. | Found via code review: trusting agent input would let cumulative caps be under-counted. |
 | 9 | **Swappable "seams" everywhere** | `PaymentSigner`, `OrderStore`, `FacilitatorClient`, `IdentityVerifier` are all interfaces with a real impl + a local/mock impl, injected. | Lets us test offline and swap CDP/Auth0/SQLite in later **without touching callers**. This is the project's load-bearing pattern. |
 | 10 | **In-process demo console** | Boots merchant + identity + agent in one process and proxies the merchant API (no CORS), serving a no-build vanilla-JS UI. | One command (`npm run console`) to validate the buyer + merchant UX. |
+| 11 | **x401 + Proof VCs as the identity source for HAM** | Replace OIDC→Intent with a verifiable-credential presentation→Intent: the human selectively discloses identity (DCQL) and authorizes the payment (`transaction_data`) in one SD-JWT-VC presentation, which the AS verifies before signing the Intent. x402/merchant unchanged. | Proves "who authorized *this* payment". Proof's flow is a human-in-the-loop redirect, so it's an up-front step, not a per-request gate. See [X401-PROTOCOL.md](./X401-PROTOCOL.md). |
+| 12 | **VC seam built on the Proof/SD-JWT stack** | `packages/credentials` uses `@sd-jwt/sd-jwt-vc` + `@owf/crypto` (Proof's own libs, WebCrypto) so the same code issues/holds/presents/verifies offline AND runs in the browser wallet. `VerifiableCredentialVerifier` = `localVcVerifier` (mock) / `proofVcVerifier` (live). | Live Proof is a config swap (`PROOF_MODE=live`). The mock implements the real interface, so tests exercise the real verification path. |
+| 13 | **Build-based (Vite + Svelte) wallet demo** | The wallet needs to bundle `@sd-jwt/*` for *real* in-browser selective disclosure + animated protocol visuals, which the no-build console (decision 10) can't do cleanly. | A second app (`apps/wallet-demo`); the original console stays no-build. |
 
 ---
 
@@ -184,8 +187,10 @@ catalog-price fix above).
 | x402 payment slice (offline settlement via mock) | ✅ |
 | OIDC + HAM enforcement | ✅ |
 | Buyer/merchant UX consoles | ✅ |
+| x401 + Proof VC identity (DCQL selective disclosure + payment binding) → HAM | ✅ (offline; `packages/credentials`, `apps/wallet-demo`) |
 | **Live** Base Sepolia settlement | ⏳ needs free CDP key + faucet USDC |
 | **Real** Auth0 identity | ⏳ one-line `auth0Verifier` swap + tenant creds |
+| **Live** Proof VC presentation | ⏳ `PROOF_MODE=live` + Proof OAuth app (`PROOF_CLIENT_ID`, registered redirect URI, sandbox user email) |
 
 ## 9. How to extend it
 
@@ -210,5 +215,8 @@ catalog-price fix above).
 | Resilient settlement | `packages/merchant/src/facilitator/resilient.ts` |
 | Mandate gate + spend ledger | `packages/merchant/src/mandate-gate.ts` |
 | OIDC + mandate signing | `packages/identity/src/{oidc,mandate,keys}.ts` |
+| x401 + Proof VC seam (SD-JWT-VC, DCQL, transaction_data, verifier) | `packages/credentials/src/` |
+| VC→Intent issuance | `packages/identity/src/mandate.ts` (`issueIntentFromPresentation`) |
 | Agent wallet + x402 client | `packages/agent/src/{wallet,x402-client,buyer}.ts` |
-| Demo console | `apps/console/` |
+| Demo console (OIDC + HAM) | `apps/console/` |
+| x401 wallet demo (VC → HAM → x402) | `apps/wallet-demo/` |

@@ -18,8 +18,13 @@ import {
   type CartMandate,
   type IntentMandate,
   type PaymentMandate,
+  type Principal,
   type ValidationResult,
 } from "@agentic-payments/shared";
+import {
+  PROOF_CREDENTIAL_ID,
+  type VerifiedAuthorization,
+} from "@agentic-payments/credentials";
 import type { SigningKeyPair } from "./keys.ts";
 import type { IdentityVerifier } from "./oidc.ts";
 
@@ -107,18 +112,46 @@ export class AuthorizationService {
 
   async issueIntent(req: IssueIntentRequest): Promise<IntentMandate> {
     const principal = await this.identity.verify(req.idToken);
+    return this.signIntentFor(principal, req.agentWallet, req.scope, req.ttlSeconds);
+  }
+
+  /**
+   * Issue a signed Intent from a *verified x401 VC presentation* — the live
+   * (Proof) identity path. The merchant later verifies this Intent exactly as it
+   * does an OIDC-derived one; the difference is the principal is now backed by a
+   * selectively-disclosed verifiable credential (and, via transaction_data, an
+   * authorization bound to the payment). The caller (orchestrator) performs the
+   * x401 + VC verification with `credentials.verifyAuthorization` and passes the
+   * result here, so the trust check happens once at the seam.
+   */
+  async issueIntentFromPresentation(req: IssueIntentFromPresentationRequest): Promise<IntentMandate> {
+    if (!req.authorization.result.ok) {
+      throw new Error(
+        `cannot issue intent: presentation not authorized — ${req.authorization.result.violations.join("; ")}`,
+      );
+    }
+    const principal = principalFromAuthorization(req.authorization, req.presentationDigest);
+    return this.signIntentFor(principal, req.agentWallet, req.scope, req.ttlSeconds);
+  }
+
+  private async signIntentFor(
+    principal: Principal,
+    agentWallet: `0x${string}`,
+    scope: IntentScope,
+    ttlSeconds?: number,
+  ): Promise<IntentMandate> {
     const issuedAt = this.now();
-    const ttl = req.ttlSeconds ?? 3600;
+    const ttl = ttlSeconds ?? 3600;
     const intent: IntentMandate = {
       type: "IntentMandate",
       id: randomUUID(),
       principal,
-      agentWallet: req.agentWallet,
+      agentWallet,
       scope: {
-        maxAmount: req.scope.maxAmount,
+        maxAmount: scope.maxAmount,
         currency: "USDC",
-        merchantAllowlist: req.scope.merchantAllowlist,
-        allowedCategories: req.scope.allowedCategories,
+        merchantAllowlist: scope.merchantAllowlist,
+        allowedCategories: scope.allowedCategories,
       },
       issuedAt,
       expiresAt: issuedAt + ttl,
@@ -126,6 +159,41 @@ export class AuthorizationService {
     };
     return this.signer.sign(intent);
   }
+}
+
+export interface IssueIntentFromPresentationRequest {
+  authorization: VerifiedAuthorization;
+  agentWallet: `0x${string}`;
+  scope: IntentScope;
+  ttlSeconds?: number;
+  /** Optional sha256(vp_token) for the audit trail. */
+  presentationDigest?: string;
+}
+
+/** Map a verified VC presentation to a HAM Principal. */
+function principalFromAuthorization(
+  auth: VerifiedAuthorization,
+  presentationDigest?: string,
+): Principal {
+  const proof = auth.proof;
+  const subject = (proof?.subject ?? {}) as { email?: string };
+  const issuer = proof?.issuer ?? "urn:proof:unknown-issuer";
+  // A stable subject: the disclosed email when present, else an issuer-scoped id
+  // derived from what was disclosed (the human can withhold email and still get
+  // a consistent principal within an issuer).
+  const sub = subject.email ?? `proof:${issuer}:${proof?.claimsDisclosed?.join("+") ?? "anon"}`;
+  return {
+    sub,
+    idp: issuer,
+    ...(subject.email !== undefined ? { email: subject.email, emailVerified: true } : {}),
+    verifiedVia: "x401-vp",
+    credential: {
+      id: PROOF_CREDENTIAL_ID,
+      issuer,
+      ...(presentationDigest !== undefined ? { presentationDigest } : {}),
+      ...(proof?.claimsDisclosed ? { claimsDisclosed: proof.claimsDisclosed } : {}),
+    },
+  };
 }
 
 /** Build a Cart mandate from line items (total computed from items). */

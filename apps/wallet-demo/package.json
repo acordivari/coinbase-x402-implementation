@@ -1,0 +1,25 @@
+{
+  "name": "@agentic-payments/wallet-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "tsx server/index.ts"
+  },
+  "dependencies": {
+    "@agentic-payments/agent": "*",
+    "@agentic-payments/credentials": "*",
+    "@agentic-payments/identity": "*",
+    "@agentic-payments/merchant": "*",
+    "@agentic-payments/shared": "*",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "svelte": "^5.15.0",
+    "vite": "^5.4.11"
+  }
+}

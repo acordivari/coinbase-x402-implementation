@@ -23,7 +23,8 @@ Existing seams (copy their shape):
 | Wallet | `PaymentSigner` (`shared/src/signer.ts`) | `createCdpSigner` | `createLocalSigner` (viem key) |
 | Settlement | `FacilitatorClient` (`@x402/core`) | `HTTPFacilitatorClient` | `MockFacilitator` |
 | Order persistence | `OrderStore` (`merchant/src/order-store.ts`) | (SQLite, later) | `MemoryOrderStore` |
-| Identity | `IdentityVerifier` (`identity/src/oidc.ts`) | `auth0Verifier` | `localVerifier` |
+| Identity (OIDC) | `IdentityVerifier` (`identity/src/oidc.ts`) | `auth0Verifier` | `localVerifier` |
+| Identity (VC/x401) | `VerifiableCredentialVerifier` (`credentials/src/verifier.ts`) | `proofVcVerifier` | `localVcVerifier` |
 
 Rules:
 - Keep the interface **minimal** — only what callers actually need.
