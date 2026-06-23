@@ -116,32 +116,48 @@ live orders with their state-machine status and settlement tx.
 ### Human Authorization Mandate (HAM)
 
 The protocol contribution, modeled on Google AP2's Intent → Cart → Payment
-mandate chain but with the authorizing human's **OIDC identity bound into the
+mandate chain but with the authorizing human's **identity bound into the
 Intent**. Scope checks prove `Payment ⊆ Cart ⊆ Intent` (spend cap, merchant
 allowlist, item categories, expiry). See `packages/shared/src/mandates.ts`.
+
+### x401 identity authorization — verifiable credentials + DCQL
+
+The newest layer answers *who authorized this* with a **verifiable credential**
+instead of just an OIDC login. It combines the **x401** identity-proof protocol
+with x402 payment so a verified human, in a **single credential presentation**,
+both **selectively discloses** identity (driven by a **DCQL** query) **and**
+**authorizes the specific payment** (Proof's `transaction_data` / `payment-mandate`).
+The disclosed identity becomes the HAM principal; the merchant's x402 paywall and
+settlement are unchanged.
+
+- **New seam** (`packages/credentials`): a `VerifiableCredentialVerifier` with two
+  implementations behind one interface — `localVcVerifier` (self-issued SD-JWT-VC,
+  offline/CI) and `proofVcVerifier` (live Proof). Mirrors the facilitator/identity
+  seams; selected by `PROOF_MODE=local|live`.
+- **Selective disclosure (DCQL):** credentials are SD-JWT-VC; the verifier names the
+  claims it wants and the wallet reveals only those — e.g. disclose `age_over_21`
+  without revealing `birth_date`.
+- **Payment binding (the 401↔402 join):** the agent's payment is sealed into the
+  x401 challenge, and (live) Proof binds the `payment-mandate` inside the
+  holder-signed key-binding JWT — cryptographic proof the human approved *this*
+  payment, not just "some payment".
+- **Issuer trust:** Proof signs with an ES256 **x5c** certificate chain; the verifier
+  checks the leaf signature + chain links and **pins** the chain to a trusted Proof
+  CA (configurable fingerprint or root PEM).
+
+Flow: `PROOF-REQUIRED (DCQL + payment) → wallet presentation (vp_token) → verify
+(credential + holder + nonce + payment) → signed HAM Intent → x402 settlement`. The
+identity source for HAM thus becomes swappable: **OIDC → Intent** *or*
+**VC presentation → Intent**, with the payment-rail unchanged. See the
+[x401 protocol notes](docs/X401-PROTOCOL.md) and run `npm run demo`.
 
 ## Develop
 
 ```bash
 npm install
-npm test          # vitest — 54+ tests across shared + merchant
+npm test          # vitest — 99+ tests across shared, merchant, identity, credentials
 npm run typecheck # tsc --noEmit, strict
 ```
-
-## Status
-
-- ✅ **Phase 0** — DRY shared core + state machine + validators
-- ✅ **Phase 1** — x402 payment slice; offline E2E settles via mock facilitator
-  (live Base Sepolia pending CDP key + faucet USDC)
-- ✅ **Phase 2** — OIDC identity + HAM enforcement (Auth0 = one-line swap)
-- ✅ **Phase 3** — buyer/merchant UX consoles (`npm run console`)
-- ✅ **Phase 4** — docs ([architecture](docs/ARCHITECTURE.md) +
-  [HAM spec](docs/HAM-PROTOCOL.md)), edge-case tests, `swappable-seams` skill
-- ✅ **Phase 5** — x401 + Proof verifiable credentials: selective-disclosure
-  (DCQL) VC presentation bound to the payment (`transaction_data`) as the
-  identity source feeding HAM; `packages/credentials`, the Svelte
-  [wallet demo](apps/wallet-demo), and the
-  [x401 protocol notes](docs/X401-PROTOCOL.md). Live Proof = `PROOF_MODE=live`.
 
 ## Live Base Sepolia path
 
