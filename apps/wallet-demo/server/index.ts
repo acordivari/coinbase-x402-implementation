@@ -2,7 +2,7 @@
  * Orchestrator backend for the x401 + x402 wallet demo. One process wires the
  * whole flow so the browser only ever talks to us (no CORS):
  *
- *   - boots the mock-CVS merchant in-process (HAM mandate enforcement ON),
+ *   - boots the mock-VeryGood-RX merchant in-process (HAM mandate enforcement ON),
  *     sharing the Authorization Service's signing key so issued Intents verify
  *   - hosts the x401 *verifier*: builds the PROOF-REQUIRED challenge with the
  *     payment's transaction_data sealed in, and verifies the returned
@@ -258,9 +258,9 @@ async function main() {
           buildProofPaymentMandate({
             amount: Number(product.priceUsd),
             currency: process.env.PROOF_PAYMENT_CURRENCY ?? "USD",
-            payeeName: "Mock CVS",
-            payeeWebsite: "https://cvs.example",
-            promptSummary: `Authorize Mock CVS to charge $${product.priceUsd} for ${product.name}.`,
+            payeeName: "Mock VeryGood-RX",
+            payeeWebsite: "https://verygood-rx.example",
+            promptSummary: `Authorize Mock VeryGood-RX to charge $${product.priceUsd} for ${product.name}.`,
             instrument: {
               type: process.env.PROOF_PAYMENT_INSTRUMENT_TYPE ?? "crypto",
               id: process.env.PROOF_PAYMENT_INSTRUMENT_ID ?? `usdc:${network}:${signer.address}`,

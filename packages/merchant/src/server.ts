@@ -1,5 +1,5 @@
 /**
- * Mock-CVS merchant server. Uses the official @x402/express middleware for
+ * Mock-VeryGood-RX merchant server. Uses the official @x402/express middleware for
  * protocol-correct 402 challenge + verify + settle (via our resilient
  * facilitator), and layers an order ledger + HTTP-level idempotency around it.
  *
@@ -205,7 +205,7 @@ if (isMain) {
   const { app, config } = createMerchantApp();
   app.listen(config.port, () => {
     console.log(
-      `[mock-CVS] listening on :${config.port} ` +
+      `[mock-VeryGood-RX] listening on :${config.port} ` +
         `(facilitator=${config.facilitatorMode}, network=${config.network})`,
     );
   });

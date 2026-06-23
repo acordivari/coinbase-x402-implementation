@@ -1,6 +1,6 @@
 /**
  * Offline end-to-end: a headless agent (throwaway viem wallet) buys from the
- * mock-CVS merchant over real x402 (402 challenge -> EIP-3009 signing -> verify
+ * mock-VeryGood-RX merchant over real x402 (402 challenge -> EIP-3009 signing -> verify
  * -> async settle via the mock facilitator). No keys, no funds, no chain.
  *
  * This proves the protocol wiring AND the application guarantees (order
@@ -44,7 +44,7 @@ async function pollOrder(nonce: string): Promise<{ state: string; txHash?: strin
   throw new Error("order did not settle in time");
 }
 
-describe("x402 agent -> mock-CVS merchant (offline E2E)", () => {
+describe("x402 agent -> mock-VeryGood-RX merchant (offline E2E)", () => {
   it("challenges with 402, then settles a signed payment to SETTLED", async () => {
     const signer = createLocalSigner();
     const payingFetch = await createPayingFetch(signer);

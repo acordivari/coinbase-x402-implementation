@@ -1,5 +1,5 @@
 /**
- * Mock-CVS product catalog. CVS has no x402 API, so this is a simulated
+ * Mock-VeryGood-RX product catalog. VeryGood-RX has no x402 API, so this is a simulated
  * storefront — but the prices flow through the real payment + authorization
  * rails. Categories line up with the mandate `allowedCategories` so the HAM
  * scope checks (Phase 2) have something meaningful to gate on.

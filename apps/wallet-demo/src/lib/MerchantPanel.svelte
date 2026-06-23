@@ -7,7 +7,7 @@
 </script>
 
 <div class="card">
-  <h2>Mock-CVS merchant · live orders</h2>
+  <h2>Mock-VeryGood-RX merchant · live orders</h2>
   <table>
     <thead><tr><th>Order</th><th>Item</th><th>USDC</th><th>State</th><th>Tx</th></tr></thead>
     <tbody>

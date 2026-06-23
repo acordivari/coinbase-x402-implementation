@@ -2,7 +2,7 @@
  * Demo console — a single runnable process that wires the whole sandbox so the
  * buyer + merchant experiences can be validated in a browser:
  *
- *   - boots the mock-CVS merchant in-process (mandate enforcement ON), sharing
+ *   - boots the mock-VeryGood-RX merchant in-process (mandate enforcement ON), sharing
  *     the Authorization Service's signing key so Intents verify
  *   - hosts the local OIDC issuer + Authorization Service (human "login" + sign
  *     Intent)
@@ -52,7 +52,7 @@ async function main() {
     { mandateVerifier: verifier },
   );
   await new Promise<void>((resolve) => merchant.app.listen(MERCHANT_PORT, resolve));
-  console.log(`[console] mock-CVS merchant on ${merchantUrl} (mandate enforcement ON)`);
+  console.log(`[console] mock-VeryGood-RX merchant on ${merchantUrl} (mandate enforcement ON)`);
 
   const intentSummary = () =>
     intent && {
