@@ -60,3 +60,47 @@ export class RevocationRegistry implements RevocationChecker {
     return [...this.revoked.values()];
   }
 }
+
+export interface HttpRevocationCheckerOptions {
+  /** Issuer status base URL, e.g. "http://issuer.local". Queried at `/revocations/:id`. */
+  baseUrl: string;
+  /** Per-check timeout in ms (default 2000). */
+  timeoutMs?: number;
+  /** Injectable fetch (tests); defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * The HTTP `RevocationChecker` — the merchant asks the issuer's status endpoint
+ * (OCSP / status-list style) whether an Intent is revoked, so issuer and merchant
+ * can be separate services.
+ *
+ * FAIL-CLOSED by design: a payment is permitted ONLY when the issuer explicitly
+ * answers `200 {revoked:false}`. Anything else — `revoked:true`, a non-200, a
+ * timeout, a network error, or a malformed/missing field — is treated as revoked
+ * so the merchant denies the spend. We never proceed on an unconfirmed status.
+ */
+export function httpRevocationChecker(opts: HttpRevocationCheckerOptions): RevocationChecker {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? 2000;
+  const base = opts.baseUrl.replace(/\/$/, "");
+  return {
+    async isRevoked(intentId: string): Promise<boolean> {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await doFetch(`${base}/revocations/${encodeURIComponent(intentId)}`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) return true; // can't confirm status -> deny
+        const body = (await res.json().catch(() => undefined)) as { revoked?: unknown } | undefined;
+        // Only an explicit "not revoked" permits the spend; ambiguity denies.
+        return body?.revoked === false ? false : true;
+      } catch {
+        return true; // unreachable / timeout / parse error -> deny
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}

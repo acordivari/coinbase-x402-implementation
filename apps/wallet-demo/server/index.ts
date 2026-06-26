@@ -27,9 +27,11 @@ import { createLocalSigner, createPayingFetch } from "@agentic-payments/agent";
 import {
   AuthorizationService,
   createSigningKeyPair,
+  httpRevocationChecker,
   MandateSigner,
   MandateVerifier,
   RevocationRegistry,
+  type RevocationChecker,
 } from "@agentic-payments/identity";
 import {
   buildPaymentMandateTransactionData,
@@ -80,6 +82,14 @@ const DEFAULT_FLOW: Flow = (FLOWS as readonly string[]).includes(process.env.WAL
 // Delegated-mandate defaults: a long-lived budget the agent spends within.
 const MANDATE_TTL = Number(process.env.MANDATE_TTL ?? 86_400); // 24h
 const MANDATE_BUDGET_USD = process.env.MANDATE_BUDGET ?? "5.00";
+
+// Revocation channel: "local" = in-process registry shared with the merchant;
+// "http" = the merchant reads an issuer status endpoint (production shape,
+// fail-closed). Mirrors FACILITATOR_MODE / PROOF_MODE.
+const REVOCATION_MODE = process.env.REVOCATION_MODE === "http" ? "http" : "local";
+const REVOCATION_TIMEOUT_MS = process.env.REVOCATION_STATUS_TIMEOUT_MS
+  ? Number(process.env.REVOCATION_STATUS_TIMEOUT_MS)
+  : undefined;
 
 // Live Proof SDK config (proof-vc-common): trust store + hosted-request settings.
 const PROOF_TRUST_ROOT = process.env.PROOF_TRUST_ROOT === "production" ? "production" : "development";
@@ -308,9 +318,30 @@ export async function createDemoApp(): Promise<DemoApp> {
   const signer = createLocalSigner();
 
   // --- boot the in-process merchant (mandate enforcement ON) ---
+  // Revocation channel selection. In "http" mode the merchant reads the issuer's
+  // status endpoint over HTTP (fail-closed) instead of sharing the registry object
+  // — modelling issuer and merchant as separate services. The issuer (the AS)
+  // still WRITES the same registry via revokeIntent; only the read path changes.
+  let issuerStatusServer: Server | undefined;
+  let revocationChecker: RevocationChecker = revocations;
+  if (REVOCATION_MODE === "http") {
+    const statusApp = express();
+    // OCSP-style public status: a yes/no for a mandate id, backed by the registry.
+    statusApp.get("/revocations/:id", (req, res) => res.json({ revoked: revocations.isRevoked(req.params.id) }));
+    issuerStatusServer = await new Promise<Server>((resolve) => {
+      const s = statusApp.listen(0, () => resolve(s));
+    });
+    const baseUrl = `http://localhost:${(issuerStatusServer.address() as AddressInfo).port}`;
+    revocationChecker = httpRevocationChecker({
+      baseUrl,
+      ...(REVOCATION_TIMEOUT_MS !== undefined ? { timeoutMs: REVOCATION_TIMEOUT_MS } : {}),
+    });
+    console.log(`[demo] revocation channel: HTTP issuer status ${baseUrl} (fail-closed)`);
+  }
+
   const merchant = createMerchantApp(
     { facilitatorMode: "mock", payTo: MERCHANT },
-    { mandateVerifier, revocation: revocations },
+    { mandateVerifier, revocation: revocationChecker },
   );
   const merchantServer = await new Promise<Server>((resolve) => {
     const s = merchant.app.listen(MERCHANT_PORT, () => resolve(s));
@@ -746,6 +777,7 @@ export async function createDemoApp(): Promise<DemoApp> {
     defaultFlow: DEFAULT_FLOW,
     close: () => new Promise<void>((resolve) => {
       clearInterval(sweep);
+      issuerStatusServer?.close();
       merchantServer.close(() => resolve());
     }),
   };

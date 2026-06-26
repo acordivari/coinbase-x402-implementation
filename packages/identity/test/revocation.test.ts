@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RevocationRegistry } from "../src/revocation.ts";
+import { httpRevocationChecker, RevocationRegistry } from "../src/revocation.ts";
 
 describe("RevocationRegistry", () => {
   it("reports not-revoked until an id is revoked", () => {
@@ -32,5 +32,40 @@ describe("RevocationRegistry", () => {
     r.revoke("a", "x");
     r.revoke("b");
     expect(r.list().map((x) => x.intentId).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("httpRevocationChecker (fail-closed)", () => {
+  const withFetch = (impl: () => Promise<unknown>) =>
+    httpRevocationChecker({ baseUrl: "http://issuer.local", fetchImpl: (async () => impl()) as unknown as typeof fetch });
+
+  it("permits ONLY on an explicit 200 {revoked:false}", async () => {
+    const c = withFetch(async () => ({ ok: true, json: async () => ({ revoked: false }) }));
+    expect(await c.isRevoked("m")).toBe(false);
+  });
+
+  it("denies on revoked:true", async () => {
+    const c = withFetch(async () => ({ ok: true, json: async () => ({ revoked: true }) }));
+    expect(await c.isRevoked("m")).toBe(true);
+  });
+
+  it("denies on a non-200 (status unconfirmed)", async () => {
+    const c = withFetch(async () => ({ ok: false, json: async () => ({}) }));
+    expect(await c.isRevoked("m")).toBe(true);
+  });
+
+  it("denies on a 200 with a missing/ambiguous field", async () => {
+    const c = withFetch(async () => ({ ok: true, json: async () => ({}) }));
+    expect(await c.isRevoked("m")).toBe(true);
+  });
+
+  it("denies on a malformed body", async () => {
+    const c = withFetch(async () => ({ ok: true, json: async () => { throw new Error("bad json"); } }));
+    expect(await c.isRevoked("m")).toBe(true);
+  });
+
+  it("denies on a network error / unreachable issuer", async () => {
+    const c = withFetch(async () => { throw new Error("ECONNREFUSED"); });
+    expect(await c.isRevoked("m")).toBe(true);
   });
 });

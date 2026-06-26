@@ -10,12 +10,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+import express from "express";
 import { createMerchantApp, type MerchantApp } from "@agentic-payments/merchant";
 import { createLocalSigner, createPayingFetch, type PaymentSigner } from "@agentic-payments/agent";
 import { dollarsToAtomic } from "@agentic-payments/shared";
 import {
   AuthorizationService,
   createSigningKeyPair,
+  httpRevocationChecker,
   MandateSigner,
   MandateVerifier,
   RevocationRegistry,
@@ -121,9 +123,9 @@ async function grantMandate(agentWallet: `0x${string}`): Promise<IntentMandate> 
   });
 }
 
-async function buy(signer: PaymentSigner, sku: string, intent: IntentMandate, key: string) {
+async function buy(signer: PaymentSigner, sku: string, intent: IntentMandate, key: string, baseUrl = base) {
   const payingFetch = await createPayingFetch(signer);
-  const res = await payingFetch(`${base}/buy/${sku}`, {
+  const res = await payingFetch(`${baseUrl}/buy/${sku}`, {
     headers: {
       "Idempotency-Key": key,
       "X-Authorization-Mandate": Buffer.from(JSON.stringify(intent)).toString("base64"),
@@ -132,9 +134,9 @@ async function buy(signer: PaymentSigner, sku: string, intent: IntentMandate, ke
   return { status: res.status, body: (await res.json().catch(() => ({}))) as any };
 }
 
-async function pollSettled(nonce: string): Promise<string> {
+async function pollSettled(nonce: string, baseUrl = base): Promise<string> {
   for (let i = 0; i < 25; i++) {
-    const r = await fetch(`${base}/orders/by-nonce/${nonce}`);
+    const r = await fetch(`${baseUrl}/orders/by-nonce/${nonce}`);
     if (r.ok) {
       const order = (await r.json()) as { state: string };
       if (order.state === "SETTLED" || order.state === "FAILED") return order.state;
@@ -180,5 +182,63 @@ describe("mandate revocation (issuer kills a still-valid mandate; merchant enfor
     const b = await buy(signerB, "allergy-relief-24", intentB, "rev-iso-b");
     expect(b.status).toBe(200);
     expect(await pollSettled(b.body.receipt.paymentNonce)).toBe("SETTLED");
+  });
+});
+
+describe("revocation over the HTTP issuer status channel (fail-closed)", () => {
+  let statusServer: Server;
+  let httpMerchant: MerchantApp;
+  let httpServer: Server;
+  let httpBase: string;
+
+  beforeAll(async () => {
+    // The issuer's OCSP-style status endpoint, over the SAME registry the AS writes.
+    const statusApp = express();
+    statusApp.get("/revocations/:id", (req, res) => res.json({ revoked: revocations.isRevoked(req.params.id) }));
+    statusServer = await new Promise<Server>((resolve) => { const s = statusApp.listen(0, () => resolve(s)); });
+    const statusBase = `http://127.0.0.1:${(statusServer.address() as AddressInfo).port}`;
+
+    // A merchant that reads revocation over HTTP (not the shared object).
+    httpMerchant = createMerchantApp(
+      { facilitatorMode: "mock", payTo: MERCHANT },
+      {
+        mandateVerifier: new MandateVerifier([{ kid: asKey.kid, publicKey: asKey.publicKey }]),
+        revocation: httpRevocationChecker({ baseUrl: statusBase, timeoutMs: 1000 }),
+      },
+    );
+    httpServer = await new Promise<Server>((resolve) => { const s = httpMerchant.app.listen(0, () => resolve(s)); });
+    httpBase = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => httpServer.close(() => r()));
+    if (statusServer.listening) await new Promise<void>((r) => statusServer.close(() => r()));
+  });
+
+  it("propagates a revocation over HTTP: settles before, denied after", async () => {
+    const signer = createLocalSigner();
+    const intent = await grantMandate(signer.address);
+
+    const before = await buy(signer, "allergy-relief-24", intent, "http-before", httpBase);
+    expect(before.status).toBe(200);
+    expect(await pollSettled(before.body.receipt.paymentNonce, httpBase)).toBe("SETTLED");
+
+    service.revokeIntent(intent.id, "revoked over HTTP");
+    const after = await buy(signer, "vitamin-d3-2000", intent, "http-after", httpBase);
+    expect(after.status).toBe(403);
+    expect(JSON.stringify(after.body.violations)).toMatch(/revoked/);
+  });
+
+  it("FAILS CLOSED: denies a non-revoked mandate when the issuer is unreachable", async () => {
+    const signer = createLocalSigner();
+    const intent = await grantMandate(signer.address); // never revoked
+    expect(revocations.isRevoked(intent.id)).toBe(false);
+
+    // Take the issuer status endpoint down → the merchant can't confirm status.
+    await new Promise<void>((r) => statusServer.close(() => r()));
+
+    const res = await buy(signer, "allergy-relief-24", intent, "http-failclosed", httpBase);
+    expect(res.status).toBe(403); // safety over availability: deny when unconfirmed
+    expect(JSON.stringify(res.body.violations)).toMatch(/revoked/);
   });
 });

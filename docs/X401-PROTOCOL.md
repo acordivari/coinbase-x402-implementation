@@ -148,14 +148,19 @@ authorization model HAM was designed for — a headless agent can't complete a
 human-in-the-loop redirect mid-`/buy`, so the human pre-authorizes a scope once.
 
 **Revocation.** A durable mandate would be unstoppable until expiry, so the issuer
-can **revoke** it early: `AuthorizationService.revokeIntent(id)` writes to a shared
-`RevocationRegistry` (the `RevocationChecker` seam — in-process here, swappable for
-an issuer status endpoint later; see ARCHITECTURE.md §8 "Deferred for production"),
-and the merchant gate refuses any further spend against
-that Intent — even though it's still validly signed, in-scope, under-cap, and
-unexpired. Revocation is by mandate `id`, permanent, and checked *before* the cap
-reservation, so a leaked or compromised standing mandate is killed at the merchant
-the moment it's revoked (`POST /api/mandate/revoke`; `test/e2e-revocation.test.ts`).
+can **revoke** it early: `AuthorizationService.revokeIntent(id)` records it, and the
+merchant gate refuses any further spend against that Intent — even though it's still
+validly signed, in-scope, under-cap, and unexpired. Revocation is by mandate `id`,
+permanent, and checked *before* the cap reservation, so a leaked or compromised
+standing mandate is killed at the merchant the moment it's revoked
+(`POST /api/mandate/revoke`; `test/e2e-revocation.test.ts`).
+
+The merchant reads status through the `RevocationChecker` seam, selectable via
+`REVOCATION_MODE`: an **in-process** `RevocationRegistry` (default), or an **HTTP**
+`httpRevocationChecker` against the issuer's status endpoint (OCSP / status-list
+style) so issuer and merchant can be separate services. The HTTP path is
+**fail-closed** — if the merchant can't confirm "not revoked" (unreachable, timeout,
+non-200, ambiguous), the spend is denied. (See ARCHITECTURE.md §8.)
 
 ### Orchestrator session model (who may spend a mandate)
 
