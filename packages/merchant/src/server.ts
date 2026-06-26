@@ -27,15 +27,21 @@ import {
 import { buildFacilitator } from "./facilitator/index.ts";
 import type { SettleHooks } from "./facilitator/resilient.ts";
 import { MemoryOrderStore, type OrderStore } from "./order-store.ts";
-import { createMandateGate, IntentSpendLedger } from "./mandate-gate.ts";
+import { createMandateGate } from "./mandate-gate.ts";
+import { InMemorySpendLedger, type SpendLedger } from "./spend-ledger.ts";
 import { decodePaymentAuthorization } from "./x402-headers.ts";
 import type { MandateVerifier, RevocationChecker } from "@agentic-payments/identity";
+
+export * from "./spend-ledger.ts";
 
 export interface MerchantAppOptions {
   /** When set, /buy requires a signed Human Authorization Mandate (Phase 2). */
   mandateVerifier?: MandateVerifier;
   /** When set, /buy also refuses any Intent the issuer has revoked. */
   revocation?: RevocationChecker;
+  /** Spend-cap ledger; defaults to a per-process in-memory one. Inject a durable
+   *  (file) or global (http) ledger for cross-restart / cross-merchant caps. */
+  ledger?: SpendLedger;
 }
 
 const ORDER_HEADER = "idempotency-key";
@@ -73,13 +79,14 @@ export function createMerchantApp(
   assertConfigValid(config);
   const orders = new MemoryOrderStore();
   const nonceToOrder = new Map<string, string>();
-  const ledger = new IntentSpendLedger();
+  // Default to an in-process ledger; the caller can inject a durable/global one.
+  const ledger: SpendLedger = options.ledger ?? new InMemorySpendLedger();
 
   // When settlement resolves (after the response), advance the order. This is
   // where AUTHORIZED -> SETTLED (or -> FAILED) actually happens.
   const hooks: SettleHooks = {
-    onSettleSuccess: (nonce, res) => {
-      ledger.commit(nonce); // move reserved spend to committed
+    onSettleSuccess: async (nonce, res) => {
+      await ledger.commit(nonce); // move reserved spend to committed (may be remote)
       const id = nonceToOrder.get(nonce.toLowerCase());
       const order = id ? orders.get(id) : undefined;
       if (!id || order?.state !== "AUTHORIZED") return;
@@ -87,8 +94,8 @@ export function createMerchantApp(
       orders.transition(id, "SETTLED");
       orders.attachPayment(id, { nonce, txHash: res.transaction });
     },
-    onSettleFailure: (nonce) => {
-      ledger.release(nonce); // free the cap reservation
+    onSettleFailure: async (nonce) => {
+      await ledger.release(nonce); // free the cap reservation
       const id = nonceToOrder.get(nonce.toLowerCase());
       const order = id ? orders.get(id) : undefined;
       if (id && order?.state === "AUTHORIZED") orders.transition(id, "FAILED");

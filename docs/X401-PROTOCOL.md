@@ -140,9 +140,10 @@ instruction and whose amount is the cap) instead of a single payment. The
 Authorization Service issues **one long-lived** `IntentMandate` (`merchantAllowlist`
 + `allowedCategories` + `maxAmount` + a `MANDATE_TTL` expiry). The agent then
 settles **many** purchases over x402 with **no further human approval** — the
-signed Intent is the standing authorization. The merchant's existing
-`IntentSpendLedger` enforces the **cumulative cap across purchases**, so an
-over-budget or out-of-scope buy is denied on its own, with nobody in the loop
+signed Intent is the standing authorization. The merchant's `SpendLedger`
+(`LEDGER_MODE`: in-memory, durable file, or a central HTTP service that's **global
+across merchants**, fail-closed) enforces the **cumulative cap across purchases**, so
+an over-budget or out-of-scope buy is denied on its own, with nobody in the loop
 (`POST /api/agent/run`; `test/e2e-delegated.test.ts`). This is the up-front
 authorization model HAM was designed for — a headless agent can't complete a
 human-in-the-loop redirect mid-`/buy`, so the human pre-authorizes a scope once.

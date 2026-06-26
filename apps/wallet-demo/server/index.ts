@@ -18,11 +18,18 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import express, { type Express, type RequestHandler } from "express";
 import { dollarsToAtomic, loadEnv, type IntentMandate } from "@agentic-payments/shared";
-import { createMerchantApp } from "@agentic-payments/merchant";
+import {
+  createMerchantApp,
+  createSpendLedgerRouter,
+  FileSpendLedger,
+  httpSpendLedger,
+  type SpendLedger,
+} from "@agentic-payments/merchant";
 import { createLocalSigner, createPayingFetch } from "@agentic-payments/agent";
 import {
   AuthorizationService,
@@ -87,6 +94,12 @@ const MANDATE_BUDGET_USD = process.env.MANDATE_BUDGET ?? "5.00";
 // "http" = the merchant reads an issuer status endpoint (production shape,
 // fail-closed). Mirrors FACILITATOR_MODE / PROOF_MODE.
 const REVOCATION_MODE = process.env.REVOCATION_MODE === "http" ? "http" : "local";
+
+// Spend-cap ledger: "local" = per-process in-memory (default); "http" = a central
+// durable ledger service the merchant reserves/commits against (global + survives
+// restart). Mirrors REVOCATION_MODE.
+const LEDGER_MODE = process.env.LEDGER_MODE === "http" ? "http" : "local";
+const LEDGER_FILE = process.env.LEDGER_FILE ?? path.join(os.tmpdir(), "agentic-payments-spend-ledger.json");
 const REVOCATION_TIMEOUT_MS = process.env.REVOCATION_STATUS_TIMEOUT_MS
   ? Number(process.env.REVOCATION_STATUS_TIMEOUT_MS)
   : undefined;
@@ -339,9 +352,25 @@ export async function createDemoApp(): Promise<DemoApp> {
     console.log(`[demo] revocation channel: HTTP issuer status ${baseUrl} (fail-closed)`);
   }
 
+  // Spend-cap ledger selection. In "http" mode the merchant reserves/commits
+  // against a central, file-durable ledger service (global across merchants;
+  // survives restart). In "local" mode the merchant uses its own in-memory one.
+  let ledgerServer: Server | undefined;
+  let spendLedger: SpendLedger | undefined;
+  if (LEDGER_MODE === "http") {
+    const ledgerApp = express();
+    ledgerApp.use(createSpendLedgerRouter(new FileSpendLedger(LEDGER_FILE)));
+    ledgerServer = await new Promise<Server>((resolve) => {
+      const s = ledgerApp.listen(0, () => resolve(s));
+    });
+    const baseUrl = `http://localhost:${(ledgerServer.address() as AddressInfo).port}`;
+    spendLedger = httpSpendLedger({ baseUrl });
+    console.log(`[demo] spend-cap ledger: HTTP central ledger ${baseUrl} (durable file ${LEDGER_FILE}, fail-closed)`);
+  }
+
   const merchant = createMerchantApp(
     { facilitatorMode: "mock", payTo: MERCHANT },
-    { mandateVerifier, revocation: revocationChecker },
+    { mandateVerifier, revocation: revocationChecker, ...(spendLedger ? { ledger: spendLedger } : {}) },
   );
   const merchantServer = await new Promise<Server>((resolve) => {
     const s = merchant.app.listen(MERCHANT_PORT, () => resolve(s));
@@ -778,6 +807,7 @@ export async function createDemoApp(): Promise<DemoApp> {
     close: () => new Promise<void>((resolve) => {
       clearInterval(sweep);
       issuerStatusServer?.close();
+      ledgerServer?.close();
       merchantServer.close(() => resolve());
     }),
   };

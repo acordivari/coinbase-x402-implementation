@@ -211,12 +211,27 @@ these **before any real-funds or multi-instance deployment**:
   (safety over availability). *Still open:* a persistent/shared store behind the
   registry, and locking down the status endpoint with a service token if a
   deployment needs it.
-- **Spend-cap ledger (durability + scope)** — `IntentSpendLedger` is in-memory and
-  per-merchant-process, so the cumulative cap resets on restart and isn't global
-  across `merchantAllowlist`. **Later:** a shared/persistent, cross-merchant ledger.
+- **Spend-cap ledger** — ✅ **built, selectable** via `LEDGER_MODE`. The `SpendLedger`
+  seam (`packages/merchant/src/spend-ledger.ts`) has `InMemorySpendLedger` (default),
+  `FileSpendLedger` (**durable** — committed spend survives a restart via a JSON
+  file), and `httpSpendLedger` against a central `createSpendLedgerRouter` service so
+  the cap is enforced **globally across merchants**. **Fail-closed**: if the ledger
+  can't be reached, `reserve`/`total` deny; `commit`/`release` are fail-safe
+  (over-count, never over-spend). *Still open:* a real DB behind the service +
+  authn on the ledger endpoints.
 - **Orchestrator session store** — per-client sessions live in an in-memory `Map`
   (single process). **Later:** a shared/persistent session store (+ `Secure`
   cookies behind TLS).
+
+### Dependency advisories
+
+`npm audit` is clean of **runtime** findings: the `ws` DoS (GHSA-96hv-2xvq-fx4p,
+transitive via viem's websocket transport) is pinned to the patched `8.21.0` via a
+root `overrides`. The remaining advisories (esbuild/vite/vitest) are **dev/build
+tooling only** — they are not in any shipped artifact (the production web build has
+no dev server; tests don't run in prod, and the "critical" vitest advisory requires
+running the Vitest UI server, which we never do). Their fixes are major-version bumps
+(vite 5→8, vitest 2→4) and are deferred to a dedicated tooling-upgrade task.
 
 ## 9. How to extend it
 

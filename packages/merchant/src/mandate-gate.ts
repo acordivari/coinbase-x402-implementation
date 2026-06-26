@@ -20,7 +20,6 @@ import {
   nowSeconds,
   validateCartAgainstIntent,
   validatePaymentAgainstCart,
-  type ValidationResult,
 } from "@agentic-payments/shared";
 import {
   buildCartMandate,
@@ -30,56 +29,21 @@ import {
 } from "@agentic-payments/identity";
 import { findProduct, productPriceAtomic } from "./catalog.ts";
 import { decodePaymentAuthorization } from "./x402-headers.ts";
+import type { SpendLedger } from "./spend-ledger.ts";
+
+// The spend-cap ledger seam (in-memory / file / http) lives in `spend-ledger.ts`;
+// re-exported here for back-compat with the historical `IntentSpendLedger` name.
+export { InMemorySpendLedger, IntentSpendLedger, type SpendLedger } from "./spend-ledger.ts";
 
 const MANDATE_HEADER = "x-authorization-mandate";
-
-/**
- * Tracks committed + reserved spend per Intent so cumulative spend can't exceed
- * the Intent cap. Reserve at the gate (for an authorized purchase), then commit
- * on settle success or release on settle failure / when the purchase is not
- * authorized. Every reserve has exactly one matching commit or release.
- */
-export class IntentSpendLedger {
-  private readonly committed = new Map<string, bigint>();
-  private readonly reservations = new Map<string, { intentId: string; amount: bigint }>();
-
-  reserve(intentId: string, nonce: string, amount: bigint, cap: bigint): ValidationResult {
-    const projected = this.total(intentId) + amount;
-    if (projected > cap) {
-      return collect([`cumulative spend ${projected} would exceed intent cap ${cap}`]);
-    }
-    this.reservations.set(nonce.toLowerCase(), { intentId, amount });
-    return { ok: true };
-  }
-
-  commit(nonce: string): void {
-    const key = nonce.toLowerCase();
-    const r = this.reservations.get(key);
-    if (!r) return;
-    this.committed.set(r.intentId, (this.committed.get(r.intentId) ?? 0n) + r.amount);
-    this.reservations.delete(key);
-  }
-
-  release(nonce: string): void {
-    this.reservations.delete(nonce.toLowerCase());
-  }
-
-  /** Committed + currently-reserved spend for an intent. */
-  total(intentId: string): bigint {
-    let sum = this.committed.get(intentId) ?? 0n;
-    for (const r of this.reservations.values()) {
-      if (r.intentId === intentId) sum += r.amount;
-    }
-    return sum;
-  }
-}
 
 export interface MandateGateOptions {
   verifier: MandateVerifier;
   merchant: `0x${string}`;
   asset: `0x${string}`;
   network: typeof X402_NETWORK;
-  ledger: IntentSpendLedger;
+  /** Spend-cap ledger — in-memory (default), durable (file), or global (http). */
+  ledger: SpendLedger;
   /** Optional issuer revocation list — a revoked Intent is refused before settlement. */
   revocation?: RevocationChecker;
   now?: () => number;
@@ -141,8 +105,16 @@ export function createMandateGate(opts: MandateGateOptions) {
     ]);
     if (!base.ok) return deny(res, 403, "authorization denied", base.violations);
 
-    // Cumulative-cap feasibility (committed + reserved + this purchase).
-    if (opts.ledger.total(intent.id) + price > BigInt(intent.scope.maxAmount)) {
+    // Cumulative-cap feasibility (committed + reserved + this purchase). The
+    // ledger may be remote (global/durable); if its status can't be read, fail
+    // CLOSED — deny rather than risk over-spend.
+    let priorTotal: bigint;
+    try {
+      priorTotal = BigInt(await opts.ledger.total(intent.id));
+    } catch {
+      return deny(res, 403, "authorization denied", ["spend ledger unavailable"]);
+    }
+    if (priorTotal + price > BigInt(intent.scope.maxAmount)) {
       return deny(res, 403, "authorization denied", [
         `purchase would exceed intent cap ${intent.scope.maxAmount}`,
       ]);
@@ -175,7 +147,7 @@ export function createMandateGate(opts: MandateGateOptions) {
     // does not end in an authorized (200) purchase — otherwise the settle hooks
     // own the eventual commit/release. This pairs every reserve with exactly
     // one commit or release (no leaked reservations on a paywall rejection).
-    const reservation = opts.ledger.reserve(
+    const reservation = await opts.ledger.reserve(
       intent.id,
       payment.nonce,
       price,
@@ -185,7 +157,8 @@ export function createMandateGate(opts: MandateGateOptions) {
 
     const nonce = payment.nonce;
     res.on("finish", () => {
-      if (res.statusCode !== 200) opts.ledger.release(nonce);
+      // Best-effort (the response is already sent); release may be async/remote.
+      if (res.statusCode !== 200) void opts.ledger.release(nonce);
     });
 
     next();

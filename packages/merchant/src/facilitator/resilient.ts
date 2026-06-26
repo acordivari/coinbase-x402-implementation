@@ -24,9 +24,9 @@ import type {
 import { isTransient } from "./errors.ts";
 
 export interface SettleHooks {
-  onSettleStart?: (nonce: string) => void;
-  onSettleSuccess?: (nonce: string, res: SettleResponse) => void;
-  onSettleFailure?: (nonce: string, err: unknown) => void;
+  onSettleStart?: (nonce: string) => void | Promise<void>;
+  onSettleSuccess?: (nonce: string, res: SettleResponse) => void | Promise<void>;
+  onSettleFailure?: (nonce: string, err: unknown) => void | Promise<void>;
 }
 
 export interface ResilientFacilitatorOptions {
@@ -122,16 +122,16 @@ export class ResilientFacilitatorClient implements FacilitatorClient {
         const res = await this.inner.settle(payload, requirements);
         // A non-throwing-but-unsuccessful response is a terminal failure.
         if (!res.success) {
-          this.hooks.onSettleFailure?.(nonce, res);
+          await this.hooks.onSettleFailure?.(nonce, res);
           return res;
         }
-        this.hooks.onSettleSuccess?.(nonce, res);
+        await this.hooks.onSettleSuccess?.(nonce, res);
         return res;
       } catch (err) {
         lastErr = err;
         // (1) Only transient errors are retried; terminal errors bail now.
         if (!isTransient(err) || attempt === this.maxAttempts) {
-          this.hooks.onSettleFailure?.(nonce, err);
+          await this.hooks.onSettleFailure?.(nonce, err);
           throw err;
         }
         await this.sleep(this.baseDelayMs * 2 ** (attempt - 1));
