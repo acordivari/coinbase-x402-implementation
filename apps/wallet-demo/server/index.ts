@@ -16,9 +16,11 @@
  * Run: `npm run demo`  (defaults to PROOF_MODE=local, FACILITATOR_MODE=mock).
  */
 import { randomUUID } from "node:crypto";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import express from "express";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import express, { type Express } from "express";
 import { dollarsToAtomic, loadEnv, type IntentMandate } from "@agentic-payments/shared";
 import { createMerchantApp } from "@agentic-payments/merchant";
 import { createLocalSigner, createPayingFetch } from "@agentic-payments/agent";
@@ -56,9 +58,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 loadEnv(path.join(here, "..", "..", "..", ".env"));
 
 const MERCHANT = (process.env.MERCHANT_PAY_TO ?? "0xc0ffee0000000000000000000000000000000000").toLowerCase() as `0x${string}`;
-const MERCHANT_PORT = Number(process.env.MERCHANT_PORT ?? 4052);
+const MERCHANT_PORT = Number(process.env.MERCHANT_PORT ?? 4052); // 0 => ephemeral (tests)
 const DEMO_PORT = Number(process.env.DEMO_PORT ?? 4040);
-const merchantUrl = `http://localhost:${MERCHANT_PORT}`;
 const VERIFIER_ID = process.env.X401_VERIFIER_ID ?? "https://sandbox.local/merchant";
 const ISSUER_ID = process.env.X401_LOCAL_ISSUER_ID ?? "https://issuer.sandbox.local";
 const MODE = (process.env.PROOF_MODE === "live" ? "live" : "local") as "live" | "local";
@@ -83,6 +84,33 @@ const MANDATE_BUDGET_USD = process.env.MANDATE_BUDGET ?? "5.00";
 const PROOF_TRUST_ROOT = process.env.PROOF_TRUST_ROOT === "production" ? "production" : "development";
 const PROOF_ENVIRONMENT = process.env.PROOF_ENVIRONMENT ?? "sandbox"; // "sandbox" => api.fairfax.proof.com
 const PROOF_RESPONSE_MODE = process.env.PROOF_RESPONSE_MODE === "direct_post" ? "direct_post" : "fragment";
+
+// The built-in x401 encryptor key is for LOCAL/OFFLINE dev only. That key
+// authenticates the challenge state that seals the payment binding — if it ever
+// took its default value in a shared/live deployment, the binding would be
+// forgeable. So fail closed: refuse to boot with the default when PROOF_MODE=live
+// or NODE_ENV=production; only warn (and allow it) in the offline local demo.
+const DEV_ENCRYPTOR_KEY = "dev-only-x401-encryptor-key-change-me";
+function resolveEncryptorKey(): string {
+  const key = process.env.X401_ENCRYPTOR_KEY;
+  const usingDefault = !key || key === DEV_ENCRYPTOR_KEY;
+  if (!usingDefault) return key;
+  const prodLike = MODE === "live" || process.env.NODE_ENV === "production";
+  if (prodLike) {
+    throw new Error(
+      "X401_ENCRYPTOR_KEY must be set to a strong, non-default value when PROOF_MODE=live " +
+        "or NODE_ENV=production — it authenticates the x401 challenge state that seals the " +
+        "payment binding. Refusing to boot with the built-in dev key.",
+    );
+  }
+  if (process.env.NODE_ENV !== "test") {
+    console.warn(
+      "[demo] WARNING: using the built-in dev X401_ENCRYPTOR_KEY (local/offline only). " +
+        "Set X401_ENCRYPTOR_KEY for any shared or live deployment.",
+    );
+  }
+  return DEV_ENCRYPTOR_KEY;
+}
 
 interface CatalogProduct {
   sku: string;
@@ -113,7 +141,25 @@ interface Session {
   ttlSeconds: number;
 }
 
-async function main() {
+export interface DemoApp {
+  /** The orchestrator express app — caller decides whether/where to listen. */
+  app: Express;
+  /** The in-process merchant server (already listening on an ephemeral or fixed port). */
+  merchantServer: Server;
+  /** The headless agent's payment wallet address. */
+  agentWallet: `0x${string}`;
+  mode: "live" | "local";
+  defaultFlow: Flow;
+  /** Tear down the merchant server (the caller closes its own app listener). */
+  close: () => Promise<void>;
+}
+
+/**
+ * Build the demo orchestrator (and boot its in-process merchant) WITHOUT listening
+ * the orchestrator itself — so tests can drive every endpoint over real HTTP on an
+ * ephemeral port, and `main()` can listen it on DEMO_PORT for the live demo.
+ */
+export async function createDemoApp(): Promise<DemoApp> {
   // --- shared trust: the AS signs Intents; the merchant verifies them ---
   const asKey = await createSigningKeyPair("auth-service-1");
   const service = new AuthorizationService(
@@ -125,7 +171,7 @@ async function main() {
 
   // --- x401 verifier-side state ---
   const encryptor = createEncryptor({
-    key: process.env.X401_ENCRYPTOR_KEY ?? "dev-only-x401-encryptor-key-change-me",
+    key: resolveEncryptorKey(),
     purpose: "x401-agentic-payments",
   });
   const issuerKeys = await generateEs256Keys();
@@ -181,7 +227,10 @@ async function main() {
     { facilitatorMode: "mock", payTo: MERCHANT },
     { mandateVerifier },
   );
-  await new Promise<void>((resolve) => merchant.app.listen(MERCHANT_PORT, resolve));
+  const merchantServer = await new Promise<Server>((resolve) => {
+    const s = merchant.app.listen(MERCHANT_PORT, () => resolve(s));
+  });
+  const merchantUrl = `http://localhost:${(merchantServer.address() as AddressInfo).port}`;
   const catalog: CatalogProduct[] = (
     (await (await fetch(`${merchantUrl}/catalog`)).json()) as { products: CatalogProduct[] }
   ).products;
@@ -500,7 +549,19 @@ async function main() {
     res.json({ ok: true });
   });
 
-  app.listen(DEMO_PORT, () => console.log(`[demo] open http://localhost:${DEMO_PORT}  (PROOF_MODE=${MODE})`));
+  return {
+    app,
+    merchantServer,
+    agentWallet: signer.address,
+    mode: MODE,
+    defaultFlow: DEFAULT_FLOW,
+    close: () => new Promise<void>((resolve) => merchantServer.close(() => resolve())),
+  };
+}
+
+async function main() {
+  const demo = await createDemoApp();
+  demo.app.listen(DEMO_PORT, () => console.log(`[demo] open http://localhost:${DEMO_PORT}  (PROOF_MODE=${demo.mode})`));
 }
 
 function summarizeVerification(v: VerifiedAuthorization) {
@@ -555,4 +616,8 @@ const CALLBACK_HTML = `<!doctype html><meta charset="utf-8"><title>Proof callbac
 })();
 </script></body>`;
 
-main().catch((err) => { console.error(err); process.exit(1); });
+// Only boot the listener when run as a script (not when imported by tests).
+const invokedAsScript = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedAsScript) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}
