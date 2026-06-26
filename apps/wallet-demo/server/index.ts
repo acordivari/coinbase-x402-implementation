@@ -29,6 +29,7 @@ import {
   createSigningKeyPair,
   MandateSigner,
   MandateVerifier,
+  RevocationRegistry,
 } from "@agentic-payments/identity";
 import {
   buildPaymentMandateTransactionData,
@@ -237,10 +238,15 @@ export interface DemoApp {
 export async function createDemoApp(): Promise<DemoApp> {
   // --- shared trust: the AS signs Intents; the merchant verifies them ---
   const asKey = await createSigningKeyPair("auth-service-1");
+  // One revocation registry shared (in-process) between the issuer that writes it
+  // and the merchant that reads it — the swappable RevocationChecker seam.
+  const revocations = new RevocationRegistry();
   const service = new AuthorizationService(
     // No OIDC verifier needed for the x401 path; the identity comes from the VC.
     { verify: async () => { throw new Error("OIDC path disabled in this demo"); } } as never,
     new MandateSigner(asKey),
+    undefined, // default clock
+    revocations,
   );
   const mandateVerifier = new MandateVerifier([{ kid: asKey.kid, publicKey: asKey.publicKey }]);
 
@@ -304,7 +310,7 @@ export async function createDemoApp(): Promise<DemoApp> {
   // --- boot the in-process merchant (mandate enforcement ON) ---
   const merchant = createMerchantApp(
     { facilitatorMode: "mock", payTo: MERCHANT },
-    { mandateVerifier },
+    { mandateVerifier, revocation: revocations },
   );
   const merchantServer = await new Promise<Server>((resolve) => {
     const s = merchant.app.listen(MERCHANT_PORT, () => resolve(s));
@@ -418,6 +424,7 @@ export async function createDemoApp(): Promise<DemoApp> {
       mandateTtl: MANDATE_TTL,
       sku: sess.x401?.sku,
       intent: intentSummary(sess),
+      revoked: sess.intent ? revocations.isRevoked(sess.intent.id) : false,
       verification: sess.lastVerification && summarizeVerification(sess.lastVerification),
     });
   });
@@ -710,6 +717,19 @@ export async function createDemoApp(): Promise<DemoApp> {
       remainingAtomic: (capAtomic - spentAtomic).toString(),
       purchases,
     });
+  });
+
+  // --- revoke this client's standing mandate. The issuer records it; the
+  //     merchant then refuses any further spend against that Intent — even though
+  //     it's still validly signed, in-scope, and unexpired. ---
+  app.post("/api/mandate/revoke", (req, res) => {
+    const sess = res.locals.sess as ClientSession;
+    if (!sess.intent) return res.status(400).json({ error: "no mandate to revoke" });
+    const record = service.revokeIntent(sess.intent.id, String(req.body?.reason ?? "user requested"));
+    // Keep the (now-revoked) intent in the session so the agent still ATTEMPTS to
+    // spend it and the merchant is the one that refuses — demonstrating that
+    // enforcement lives at the merchant, not in the well-behaved orchestrator.
+    res.json({ revoked: true, id: record.intentId, revokedAt: record.revokedAt });
   });
 
   app.post("/api/reset", (_req, res) => {

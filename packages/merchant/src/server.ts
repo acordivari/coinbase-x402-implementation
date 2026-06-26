@@ -29,11 +29,13 @@ import type { SettleHooks } from "./facilitator/resilient.ts";
 import { MemoryOrderStore, type OrderStore } from "./order-store.ts";
 import { createMandateGate, IntentSpendLedger } from "./mandate-gate.ts";
 import { decodePaymentAuthorization } from "./x402-headers.ts";
-import type { MandateVerifier } from "@agentic-payments/identity";
+import type { MandateVerifier, RevocationChecker } from "@agentic-payments/identity";
 
 export interface MerchantAppOptions {
   /** When set, /buy requires a signed Human Authorization Mandate (Phase 2). */
   mandateVerifier?: MandateVerifier;
+  /** When set, /buy also refuses any Intent the issuer has revoked. */
+  revocation?: RevocationChecker;
 }
 
 const ORDER_HEADER = "idempotency-key";
@@ -150,6 +152,7 @@ export function createMerchantApp(
         asset: config.asset,
         network: config.network,
         ledger,
+        ...(options.revocation ? { revocation: options.revocation } : {}),
       }),
     );
   }

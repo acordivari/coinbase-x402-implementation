@@ -26,6 +26,7 @@ import {
   buildCartMandate,
   buildPaymentMandate,
   type MandateVerifier,
+  type RevocationChecker,
 } from "@agentic-payments/identity";
 import { findProduct, productPriceAtomic } from "./catalog.ts";
 import { decodePaymentAuthorization } from "./x402-headers.ts";
@@ -79,6 +80,8 @@ export interface MandateGateOptions {
   asset: `0x${string}`;
   network: typeof X402_NETWORK;
   ledger: IntentSpendLedger;
+  /** Optional issuer revocation list — a revoked Intent is refused before settlement. */
+  revocation?: RevocationChecker;
   now?: () => number;
 }
 
@@ -124,12 +127,16 @@ export function createMandateGate(opts: MandateGateOptions) {
       nowSeconds: now(),
     });
 
-    // Signature + Cart ⊆ Intent (merchant, category, per-purchase cap, validity
-    // window — including not-yet-active) via the shared validators.
+    // Signature + revocation + Cart ⊆ Intent (merchant, category, per-purchase
+    // cap, validity window — including not-yet-active) via the shared validators.
+    // Revocation is checked here so a killed mandate is refused even at the unpaid
+    // 402 stage and BEFORE any cap reservation — independent of scope/expiry.
     const sigOk = await opts.verifier.verifyProof(intent);
+    const revoked = opts.revocation ? await opts.revocation.isRevoked(intent.id) : false;
     const cartScope = validateCartAgainstIntent(cart, intent, now());
     const base = collect([
       sigOk ? null : "intent mandate signature is invalid or untrusted",
+      revoked ? "intent mandate has been revoked" : null,
       ...(cartScope.ok ? [] : cartScope.violations),
     ]);
     if (!base.ok) return deny(res, 403, "authorization denied", base.violations);

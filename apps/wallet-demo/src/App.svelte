@@ -44,6 +44,7 @@
   // Auth gate (F1): when the orchestrator requires a token and we haven't passed
   // it, show only the login card. Off in local dev (authRequired is falsy).
   const needsLogin = $derived(me.authRequired === true && me.authed !== true);
+  const revoked = $derived(me.revoked === true);
   let token = $state("");
   let budgetUsd = $state("5.00");
   let agentRun = $state<any>(undefined);
@@ -255,6 +256,21 @@
     } finally { busy = false; }
   }
 
+  async function revokeMandate() {
+    if (!intent) return;
+    busy = true;
+    try {
+      const r = await api("/api/mandate/revoke", { reason: "revoked from wallet UI" });
+      if (r?.revoked) {
+        logLine("🔒 Mandate revoked — the merchant will now refuse any further spend against it.", "ok");
+        agentRun = undefined;
+        await refreshMe();
+      } else {
+        logLine(`Revoke failed: ${r?.error ?? "unknown"}`, "bad");
+      }
+    } finally { busy = false; }
+  }
+
   async function pay() {
     if (!intent) return;
     busy = true;
@@ -436,8 +452,15 @@
               <span class="pill">spent {usd(agentRun.spentAtomic)}</span>
               <span class="pill">left {usd(agentRun.remainingAtomic)}</span>
             {/if}
+            {#if revoked}<span class="pill" style="color:var(--bad);border-color:var(--bad)">🔒 revoked</span>{/if}
           </div>
-          <button class="alt" onclick={runAgent} disabled={busy}>Run agent (autonomous buys)</button>
+          {#if revoked}
+            <p class="note" style="margin:0 0 10px;color:var(--warn)">This mandate is revoked. The agent may still hold the signed Intent, but the merchant now refuses every spend — run the agent to see it denied.</p>
+          {/if}
+          <div class="row" style="gap:8px">
+            <button class="alt" onclick={runAgent} disabled={busy}>Run agent (autonomous buys)</button>
+            <button class="ghost" onclick={revokeMandate} disabled={busy || revoked} title="Kill this mandate before its expiry">{revoked ? "Revoked" : "Revoke mandate"}</button>
+          </div>
           {#if agentRun}
             <div class="divider"></div>
             {#each agentRun.purchases as p}
@@ -452,7 +475,11 @@
         <div class="card fade-in">
           <h2><span class="step">4</span> Pay</h2>
           <p class="note" style="margin:0 0 10px">Identity + payment authorized. The agent now settles <b>{selectedProduct?.name}</b> ({usd(authSession?.payment?.amount)}) over x402 — gated by the signed Intent.</p>
-          <button class="alt" onclick={pay} disabled={busy}>Pay {usd(authSession?.payment?.amount)} via x402</button>
+          <div class="row" style="gap:8px">
+            <button class="alt" onclick={pay} disabled={busy || revoked}>Pay {usd(authSession?.payment?.amount)} via x402</button>
+            <button class="ghost" onclick={revokeMandate} disabled={busy || revoked} title="Kill this mandate before its expiry">{revoked ? "Revoked" : "Revoke mandate"}</button>
+          </div>
+          {#if revoked}<p class="note" style="margin:8px 0 0;color:var(--warn)">Revoked — the merchant will refuse this payment.</p>{/if}
         </div>
       {/if}
 

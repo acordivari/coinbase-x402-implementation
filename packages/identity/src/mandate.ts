@@ -27,6 +27,7 @@ import {
 } from "@agentic-payments/credentials";
 import type { SigningKeyPair } from "./keys.ts";
 import type { IdentityVerifier } from "./oidc.ts";
+import type { RevocationRecord, RevocationRegistry } from "./revocation.ts";
 
 type Signable = IntentMandate | CartMandate | PaymentMandate;
 
@@ -108,7 +109,19 @@ export class AuthorizationService {
     private readonly identity: IdentityVerifier,
     private readonly signer: MandateSigner,
     private readonly now: () => number = nowSeconds,
+    /** Revocation authority. When set, issued Intents can be revoked before expiry. */
+    private readonly revocations?: RevocationRegistry,
   ) {}
+
+  /**
+   * Revoke a previously-issued Intent by id. The merchant (which shares this
+   * registry, or reads it over the wire) then refuses any further spend against
+   * it — even though the Intent remains cryptographically valid and unexpired.
+   */
+  revokeIntent(intentId: string, reason?: string): RevocationRecord {
+    if (!this.revocations) throw new Error("revocation is not configured on this AuthorizationService");
+    return this.revocations.revoke(intentId, reason);
+  }
 
   async issueIntent(req: IssueIntentRequest): Promise<IntentMandate> {
     const principal = await this.identity.verify(req.idToken);

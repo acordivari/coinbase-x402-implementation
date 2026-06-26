@@ -224,4 +224,27 @@ describe("wallet-demo orchestrator over HTTP", () => {
     expect(bobRun.status).toBe(401);
     expect(bobRun.body.error).toMatch(/no standing mandate/);
   });
+
+  it("revoke kills a standing mandate: the merchant denies the agent's spends (revocation)", async () => {
+    await api("/api/flow", { flow: "delegated" });
+    await api("/api/reset", {});
+    const start = await api("/api/authorize/start", { budgetUsd: "5.00", requestedClaims: ["given_name", "age_over_21"] });
+    const vpToken = await presentFor(api, start.body);
+    expect((await api("/api/authorize/complete", { vpToken })).body.intent).toBeTruthy();
+
+    const rev = await api("/api/mandate/revoke", { reason: "leaked" });
+    expect(rev.status).toBe(200);
+    expect(rev.body.revoked).toBe(true);
+
+    // The orchestrator still HOLDS the (now-revoked) intent...
+    const me = await api("/api/me");
+    expect(me.body.revoked).toBe(true);
+    expect(me.body.intent).toBeTruthy();
+
+    // ...but the merchant refuses every autonomous spend against it.
+    const run = await api("/api/agent/run", { skus: ["allergy-relief-24", "vitamin-d3-2000"] });
+    expect(run.status).toBe(200);
+    expect(run.body.purchases.every((p: any) => !p.settled)).toBe(true);
+    expect(JSON.stringify(run.body.purchases)).toMatch(/revoked/);
+  });
 });

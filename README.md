@@ -66,7 +66,9 @@ the agent settles over x402.
    sign a durable, scoped **mandate** (allowlist + budget cap + expiry); the agent
    then buys **many** times over x402 with **no per-purchase approval** — the
    presigned identity is the standing authorization. The merchant's cumulative-cap
-   ledger denies an over-budget buy on its own.
+   ledger denies an over-budget buy on its own, and the issuer can **revoke** the
+   mandate early (`/api/mandate/revoke`) — the merchant then refuses any further
+   spend against it, even though the signed Intent is still valid and unexpired.
 
 ```bash
 # the autonomous (delegated-mandate) demo, fully offline:

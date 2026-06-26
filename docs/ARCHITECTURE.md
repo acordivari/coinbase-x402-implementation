@@ -188,9 +188,32 @@ catalog-price fix above).
 | OIDC + HAM enforcement | ✅ |
 | Buyer/merchant UX consoles | ✅ |
 | x401 + Proof VC identity (DCQL selective disclosure + payment binding) → HAM | ✅ (offline; `packages/credentials`, `apps/wallet-demo`) |
+| Three wallet workflows + **delegated** (autonomous) mandate w/ cumulative-cap enforcement | ✅ (`WALLET_FLOW`, `/api/agent/run`; `e2e-delegated`) |
+| Mandate **revocation** (issuer kills a standing Intent; merchant refuses) | ✅ (in-process registry; `e2e-revocation`) |
+| Orchestrator auth + per-client session isolation | ✅ (signed-cookie sessions + token gate; `e2e-demo-auth`) |
 | **Live** Base Sepolia settlement | ⏳ needs free CDP key + faucet USDC |
 | **Real** Auth0 identity | ⏳ one-line `auth0Verifier` swap + tenant creds |
 | **Live** Proof VC presentation | ⏳ `PROOF_MODE=live` + Proof OAuth app (`PROOF_CLIENT_ID`, registered redirect URI, sandbox user email) |
+
+### Deferred for production (intentional in-process seams — swap, don't rewrite)
+
+The following are deliberately **in-process for the offline demo**, each behind a
+swappable seam so productionizing is an injection rather than a rewrite. Revisit
+these **before any real-funds or multi-instance deployment**:
+
+- **Revocation channel** — `RevocationChecker` (`packages/identity/src/revocation.ts`)
+  is today an in-process `RevocationRegistry` shared between the issuer (writer) and
+  the merchant (reader). **Later:** back it with an **issuer revocation/status
+  endpoint** the merchant queries (OCSP / status-list style), and decide the
+  fail-open-vs-fail-closed policy when the issuer is unreachable. Designed to mirror
+  the `IntentSpendLedger` / `MandateVerifier` injection pattern, so this is a reader
+  swap, not a gate rewrite.
+- **Spend-cap ledger (durability + scope)** — `IntentSpendLedger` is in-memory and
+  per-merchant-process, so the cumulative cap resets on restart and isn't global
+  across `merchantAllowlist`. **Later:** a shared/persistent, cross-merchant ledger.
+- **Orchestrator session store** — per-client sessions live in an in-memory `Map`
+  (single process). **Later:** a shared/persistent session store (+ `Secure`
+  cookies behind TLS).
 
 ## 9. How to extend it
 

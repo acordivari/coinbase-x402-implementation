@@ -147,6 +147,16 @@ over-budget or out-of-scope buy is denied on its own, with nobody in the loop
 authorization model HAM was designed for — a headless agent can't complete a
 human-in-the-loop redirect mid-`/buy`, so the human pre-authorizes a scope once.
 
+**Revocation.** A durable mandate would be unstoppable until expiry, so the issuer
+can **revoke** it early: `AuthorizationService.revokeIntent(id)` writes to a shared
+`RevocationRegistry` (the `RevocationChecker` seam — in-process here, swappable for
+an issuer status endpoint later; see ARCHITECTURE.md §8 "Deferred for production"),
+and the merchant gate refuses any further spend against
+that Intent — even though it's still validly signed, in-scope, under-cap, and
+unexpired. Revocation is by mandate `id`, permanent, and checked *before* the cap
+reservation, so a leaked or compromised standing mandate is killed at the merchant
+the moment it's revoked (`POST /api/mandate/revoke`; `test/e2e-revocation.test.ts`).
+
 ### Orchestrator session model (who may spend a mandate)
 
 The demo orchestrator is **per-client isolated** and **gated**: each browser gets a
@@ -170,6 +180,7 @@ with a shared store).
 | Threat | Defense |
 |---|---|
 | Agent acts with no human behind it | No valid presentation ⇒ no Intent ⇒ refused. In the **delegated** flow the human still presents once up front; the agent's autonomy is bounded by that signed scope + cap + expiry. |
+| Standing mandate leaked / agent compromised | The issuer **revokes** the Intent (`revokeIntent`); the merchant refuses every subsequent spend against it, independent of scope/cap/expiry (`RevocationChecker`). |
 | Tampered / forged credential | SD-JWT issuer signature must verify against a trusted key. |
 | Stolen presentation replayed | KB-JWT nonce bound to a single-use challenge. |
 | Presentation reused for a different payment | `transaction_data` digest binding (`txDataBound`). |
