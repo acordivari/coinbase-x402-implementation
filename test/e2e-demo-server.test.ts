@@ -155,8 +155,39 @@ describe("wallet-demo orchestrator over HTTP", () => {
   });
 
   it("agent/run requires a standing mandate (401 after reset)", async () => {
+    await api("/api/flow", { flow: "delegated" });
     await api("/api/reset", {});
     const r = await api("/api/agent/run", {});
     expect(r.status).toBe(401);
+  });
+
+  it("agent/run is rejected outside the delegated workflow (F2)", async () => {
+    await api("/api/flow", { flow: "self-issued" });
+    const r = await api("/api/agent/run", {});
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/delegated/);
+  });
+
+  it("rejects a malformed budget on the delegated grant (F3)", async () => {
+    await api("/api/flow", { flow: "delegated" });
+    for (const budgetUsd of ["abc", "-5", "0", "99999999"]) {
+      const r = await api("/api/authorize/start", { budgetUsd });
+      expect(r.status, `budget=${budgetUsd}`).toBe(400);
+      expect(r.body.error).toMatch(/budgetUsd/);
+    }
+  });
+
+  it("rejects out-of-catalog categories on the grant (F3)", async () => {
+    await api("/api/flow", { flow: "delegated" });
+    const r = await api("/api/authorize/start", { budgetUsd: "5.00", categories: ["totally-made-up"] });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/categories/);
+  });
+
+  it("rejects an oversized skus list on agent/run (F3)", async () => {
+    await api("/api/flow", { flow: "delegated" });
+    const r = await api("/api/agent/run", { skus: Array.from({ length: 21 }, () => "allergy-relief-24") });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/skus/);
   });
 });

@@ -341,9 +341,26 @@ export async function createDemoApp(): Promise<DemoApp> {
     let amountUsd: string;
     let promptSummary: string;
     if (grant) {
-      const budget = String(budgetUsd ?? MANDATE_BUDGET_USD);
+      // Validate the budget: a positive, finite USDC amount (avoids a hung
+      // request from dollarsToAtomic throwing on garbage). Normalize to cents.
+      const budgetNum = Number(budgetUsd ?? MANDATE_BUDGET_USD);
+      if (!Number.isFinite(budgetNum) || budgetNum <= 0 || budgetNum > 1_000_000) {
+        return res.status(400).json({ error: "budgetUsd must be a positive number up to 1,000,000 USDC" });
+      }
+      const budget = budgetNum.toFixed(2);
+      // Restrict the granted scope to real catalog categories.
       const allCats = [...new Set(catalog.map((p) => p.category))];
-      const cats: string[] = Array.isArray(categories) && categories.length ? categories : allCats;
+      let cats: string[];
+      if (categories === undefined) {
+        cats = allCats;
+      } else if (Array.isArray(categories) && categories.every((c) => typeof c === "string")) {
+        cats = (categories as string[]).filter((c) => allCats.includes(c));
+        if (cats.length === 0) {
+          return res.status(400).json({ error: `categories must include at least one of: ${allCats.join(", ")}` });
+        }
+      } else {
+        return res.status(400).json({ error: "categories must be an array of strings" });
+      }
       amountUsd = budget;
       promptSummary = `Standing mandate: authorize this agent to spend up to $${budget} at Mock VeryGood-RX across ${cats.join(", ")}.`;
       td = buildPaymentMandateTransactionData({
@@ -501,10 +518,21 @@ export async function createDemoApp(): Promise<DemoApp> {
   //     signed Intent) IS the authorization; the merchant enforces the cumulative
   //     cap, so an over-budget buy is denied without anyone in the loop. ---
   app.post("/api/agent/run", async (req, res) => {
+    // Autonomous spending is a delegated-only capability — don't let a
+    // single-purchase Intent from another flow drive the multi-buy loop.
+    if (flow !== "delegated") {
+      return res.status(400).json({ error: "agent/run is only available in the delegated workflow" });
+    }
+    // Validate the requested skus up front (bound the loop; reject malformed input).
+    const rawSkus = req.body?.skus;
+    if (rawSkus !== undefined &&
+        (!Array.isArray(rawSkus) || rawSkus.length === 0 || rawSkus.length > 20 ||
+         !rawSkus.every((s: unknown) => typeof s === "string"))) {
+      return res.status(400).json({ error: "skus must be a non-empty array of up to 20 sku strings" });
+    }
     if (!intent) return res.status(401).json({ error: "no standing mandate — grant one first" });
-    const requested: string[] = Array.isArray(req.body?.skus) && req.body.skus.length
-      ? req.body.skus
-      : ["allergy-relief-24", "vitamin-d3-2000", "ibuprofen-200", "toothpaste-mint"];
+    const requested: string[] = (rawSkus as string[] | undefined) ??
+      ["allergy-relief-24", "vitamin-d3-2000", "ibuprofen-200", "toothpaste-mint"];
     const payingFetch = await createPayingFetch(signer);
     const mandateHeader = Buffer.from(JSON.stringify(intent)).toString("base64");
     const capAtomic = BigInt(intent.scope.maxAmount);
