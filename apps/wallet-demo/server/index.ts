@@ -16,7 +16,6 @@
  * Run: `npm run demo`  (defaults to PROOF_MODE=local, FACILITATOR_MODE=mock).
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -31,12 +30,9 @@ import {
 } from "@agentic-payments/identity";
 import {
   buildPaymentMandateTransactionData,
-  buildProofPaymentMandate,
-  buildSessionTransactionData,
-  buildProofAuthorizeUrl,
-  resolveProofAuthorizeRedirect,
-  createProofTokenProvider,
   buildProofRequired,
+  buildProofSdkAuthorizeUrl,
+  proofTransactionData,
   createEncryptor,
   createIdentityChallenge,
   createVcVerifier,
@@ -50,6 +46,7 @@ import {
   sha256Base64url,
   verifyAuthorization,
   type Jwk,
+  type VerifiableCredentialVerifier,
   type VerifiedAuthorization,
   type X401Payload,
 } from "@agentic-payments/credentials";
@@ -67,6 +64,26 @@ const ISSUER_ID = process.env.X401_LOCAL_ISSUER_ID ?? "https://issuer.sandbox.lo
 const MODE = (process.env.PROOF_MODE === "live" ? "live" : "local") as "live" | "local";
 const publicDir = path.join(here, "..", "dist");
 
+// --- the three selectable wallet workflows ---
+//   self-issued : browser-held local SD-JWT-VC, per-purchase consent (offline)
+//   proof-hosted: real Proof wallet via the proof-vc-common SDK, per-purchase
+//   delegated   : one upfront grant -> a durable, scoped mandate the agent then
+//                 spends autonomously (no per-purchase human approval)
+const FLOWS = ["self-issued", "proof-hosted", "delegated"] as const;
+type Flow = (typeof FLOWS)[number];
+const DEFAULT_FLOW: Flow = (FLOWS as readonly string[]).includes(process.env.WALLET_FLOW ?? "")
+  ? (process.env.WALLET_FLOW as Flow)
+  : "self-issued";
+
+// Delegated-mandate defaults: a long-lived budget the agent spends within.
+const MANDATE_TTL = Number(process.env.MANDATE_TTL ?? 86_400); // 24h
+const MANDATE_BUDGET_USD = process.env.MANDATE_BUDGET ?? "5.00";
+
+// Live Proof SDK config (proof-vc-common): trust store + hosted-request settings.
+const PROOF_TRUST_ROOT = process.env.PROOF_TRUST_ROOT === "production" ? "production" : "development";
+const PROOF_ENVIRONMENT = process.env.PROOF_ENVIRONMENT ?? "sandbox"; // "sandbox" => api.fairfax.proof.com
+const PROOF_RESPONSE_MODE = process.env.PROOF_RESPONSE_MODE === "direct_post" ? "direct_post" : "fragment";
+
 interface CatalogProduct {
   sku: string;
   name: string;
@@ -74,11 +91,24 @@ interface CatalogProduct {
   priceUsd: string;
 }
 
+interface IntentScopeInput {
+  maxAmount: string;
+  merchantAllowlist: `0x${string}`[];
+  allowedCategories: string[];
+}
+
 interface Session {
   challengeValue: string;
   payload: X401Payload;
   transactionData: string;
-  sku: string;
+  /** x401 resource the presentation authorizes (a sku buy, or a mandate grant). */
+  resource: string;
+  /** sku for a single-purchase flow; undefined for a delegated mandate grant. */
+  sku?: string;
+  /** true when this authorizes a durable budget grant rather than one purchase. */
+  grant: boolean;
+  /** scope to stamp on the issued Intent (single sku, or the broad mandate). */
+  scope: IntentScopeInput;
   requestedClaims: string[];
   ttlSeconds: number;
 }
@@ -100,34 +130,51 @@ async function main() {
   });
   const issuerKeys = await generateEs256Keys();
   const localIssuer = new LocalVcIssuer({ issuerId: ISSUER_ID, privateJwk: issuerKeys.privateJwk });
-  // Proof trust: pin the chain to Proof's CA (default = Fairfax issuing CA, baked
-  // into proofVcVerifier). Override the fingerprints or supply a root CA PEM via
-  // env when moving to production.
-  const proofConfig: { expectedIssuer?: string; trustedCaFingerprints?: string[]; trustedRootPems?: string[] } = {};
-  if (process.env.PROOF_ISSUER) proofConfig.expectedIssuer = process.env.PROOF_ISSUER;
-  if (process.env.PROOF_TRUSTED_CA_FINGERPRINTS) {
-    proofConfig.trustedCaFingerprints = process.env.PROOF_TRUSTED_CA_FINGERPRINTS.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-  if (process.env.PROOF_TRUSTED_CA_FILE) proofConfig.trustedRootPems = [readFileSync(process.env.PROOF_TRUSTED_CA_FILE, "utf8")];
-  const vcVerifier = createVcVerifier(
-    MODE === "live"
-      ? { mode: "live", proof: proofConfig }
-      : { mode: "local", local: { issuerId: ISSUER_ID, issuerPublicJwk: issuerKeys.publicJwk } },
-  );
+
+  // --- VC verifiers (the swappable seam), one per identity substrate ---
+  // local : self-issued SD-JWT-VC against our trust anchor (offline)
+  // sdk   : real Proof presentation via @proof.com/proof-vc-common (verifyVPToken)
+  const localVerifier = createVcVerifier({
+    mode: "local",
+    local: { issuerId: ISSUER_ID, issuerPublicJwk: issuerKeys.publicJwk },
+  });
+  const callbackUri = process.env.PROOF_REDIRECT_URI ?? `http://localhost:${DEMO_PORT}/proof/callback`;
+  const proofLiveReady = Boolean(process.env.PROOF_CLIENT_ID && process.env.PROOF_CLIENT_SECRET);
+  // Built once when Proof client creds are present; configures the SDK (trust
+  // store + hosted-request PAR) so both verify and authorize go through it.
+  const sdkVerifier: VerifiableCredentialVerifier | undefined = proofLiveReady
+    ? createVcVerifier({
+        mode: "live",
+        proof: {
+          useSdk: true,
+          trustRoot: PROOF_TRUST_ROOT,
+          sdkInit: {
+            environment: PROOF_ENVIRONMENT as never,
+            clientId: process.env.PROOF_CLIENT_ID,
+            clientSecret: process.env.PROOF_CLIENT_SECRET,
+            callbackUri,
+            responseMode: PROOF_RESPONSE_MODE,
+            usePushedAuthorizationRequest: true,
+          },
+        },
+      })
+    : undefined;
+
+  // The selected workflow (mutable; switched via POST /api/flow).
+  let flow: Flow = DEFAULT_FLOW;
+  // Which flows use the real Proof identity (vs the local self-issued substrate):
+  // proof-hosted always; delegated when PROOF_MODE=live (otherwise it grants off
+  // the local credential so the autonomous demo runs fully offline).
+  const usesProof = (f: Flow): boolean => f === "proof-hosted" || (f === "delegated" && MODE === "live");
+  const verifierFor = (f: Flow): VerifiableCredentialVerifier => {
+    if (usesProof(f)) {
+      if (!sdkVerifier) throw new Error("proof identity needs PROOF_CLIENT_ID + PROOF_CLIENT_SECRET");
+      return sdkVerifier;
+    }
+    return localVerifier;
+  };
 
   const signer = createLocalSigner();
-
-  // --- Proof OAuth (client-credentials) token provider for the live path ---
-  const proofApiBase = process.env.PROOF_API_BASE ?? "https://api.proof.com";
-  const proofTokens =
-    MODE === "live" && process.env.PROOF_CLIENT_SECRET
-      ? createProofTokenProvider({
-          tokenEndpoint: process.env.PROOF_TOKEN_ENDPOINT ?? `${proofApiBase}/oauth/v2/token`,
-          clientId: process.env.PROOF_CLIENT_ID ?? "",
-          clientSecret: process.env.PROOF_CLIENT_SECRET,
-          ...(process.env.PROOF_OAUTH_SCOPE ? { scope: process.env.PROOF_OAUTH_SCOPE } : {}),
-        })
-      : undefined;
 
   // --- boot the in-process merchant (mandate enforcement ON) ---
   const merchant = createMerchantApp(
@@ -176,14 +223,37 @@ async function main() {
   app.get("/api/me", (_req, res) => {
     res.json({
       mode: MODE,
+      flow,
+      flows: FLOWS,
+      proofLiveReady,
+      identity: usesProof(flow) ? "proof" : "local",
+      delegated: flow === "delegated",
       agentWallet: signer.address,
       merchant: MERCHANT,
       verifierId: VERIFIER_ID,
       claimUniverse: PROOF_ID_CLAIM_KEYS,
+      budgetUsd: MANDATE_BUDGET_USD,
+      mandateTtl: MANDATE_TTL,
       sku: session?.sku,
       intent: intentSummary(),
       verification: lastVerification && summarizeVerification(lastVerification),
     });
+  });
+
+  // --- switch the active workflow (resets any in-flight authorization) ---
+  app.post("/api/flow", (req, res) => {
+    const next = req.body?.flow as Flow;
+    if (!(FLOWS as readonly string[]).includes(next)) {
+      return res.status(400).json({ error: `flow must be one of ${FLOWS.join(", ")}` });
+    }
+    if (usesProof(next) && !proofLiveReady) {
+      return res.status(400).json({ error: `${next} needs PROOF_CLIENT_ID + PROOF_CLIENT_SECRET (and PROOF_MODE=live)` });
+    }
+    flow = next;
+    session = undefined;
+    intent = undefined;
+    lastVerification = undefined;
+    res.json({ flow });
   });
 
   app.get("/api/catalog", (_req, res) => res.json({ products: catalog, merchant: MERCHANT }));
@@ -193,7 +263,7 @@ async function main() {
 
   // --- LOCAL mode: issue a self-issued credential to the in-browser wallet ---
   app.post("/api/wallet/issue", async (req, res) => {
-    if (MODE !== "local") return res.status(400).json({ error: "wallet issuance is local-mode only" });
+    if (usesProof(flow)) return res.status(400).json({ error: "wallet issuance is for the local-identity flows only" });
     const { holderPublicJwk, claims } = req.body ?? {};
     if (!holderPublicJwk || !claims) return res.status(400).json({ error: "holderPublicJwk + claims required" });
     try {
@@ -204,30 +274,54 @@ async function main() {
     }
   });
 
-  // --- start authorization: build payment + x401 challenge + PROOF-REQUIRED ---
+  // --- start authorization: build the payment (single buy) or budget grant
+  //     (delegated), seal it into an x401 challenge, return PROOF-REQUIRED ---
   app.post("/api/authorize/start", async (req, res) => {
-    const { sku, requestedClaims, ttlSeconds } = req.body ?? {};
-    const product = findProduct(sku);
-    if (!product) return res.status(400).json({ error: "unknown sku" });
+    const { sku, requestedClaims, ttlSeconds, budgetUsd, categories } = req.body ?? {};
     const claims: string[] = Array.isArray(requestedClaims) && requestedClaims.length
       ? requestedClaims
       : ["given_name", "family_name", "email", "age_over_21"];
+    const network = process.env.X402_NETWORK ?? "eip155:84532";
+    const grant = flow === "delegated";
 
-    const amount = dollarsToAtomic(product.priceUsd).toString();
-    const td = buildPaymentMandateTransactionData({
-      amount,
-      currency: "USDC",
-      merchant: MERCHANT,
-      network: process.env.X402_NETWORK ?? "eip155:84532",
-      sku: product.sku,
-      description: product.name,
-    });
+    // Build the payment binding + intent scope: one product, or a standing budget.
+    let resource: string;
+    let scope: IntentScopeInput;
+    let ttl: number;
+    let td: ReturnType<typeof buildPaymentMandateTransactionData>;
+    let amountUsd: string;
+    let promptSummary: string;
+    if (grant) {
+      const budget = String(budgetUsd ?? MANDATE_BUDGET_USD);
+      const allCats = [...new Set(catalog.map((p) => p.category))];
+      const cats: string[] = Array.isArray(categories) && categories.length ? categories : allCats;
+      amountUsd = budget;
+      promptSummary = `Standing mandate: authorize this agent to spend up to $${budget} at Mock VeryGood-RX across ${cats.join(", ")}.`;
+      td = buildPaymentMandateTransactionData({
+        amount: dollarsToAtomic(budget).toString(), currency: "USDC", merchant: MERCHANT,
+        network, sku: "mandate-grant", description: promptSummary,
+      });
+      resource = `${VERIFIER_ID}/mandate/grant`;
+      ttl = MANDATE_TTL;
+      scope = { maxAmount: dollarsToAtomic(budget).toString(), merchantAllowlist: [MERCHANT], allowedCategories: cats };
+    } else {
+      const product = findProduct(sku);
+      if (!product) return res.status(400).json({ error: "unknown sku" });
+      amountUsd = product.priceUsd;
+      promptSummary = `Authorize Mock VeryGood-RX to charge $${product.priceUsd} for ${product.name}.`;
+      td = buildPaymentMandateTransactionData({
+        amount: dollarsToAtomic(product.priceUsd).toString(), currency: "USDC", merchant: MERCHANT,
+        network, sku: product.sku, description: product.name,
+      });
+      resource = `${VERIFIER_ID}/buy/${product.sku}`;
+      ttl = Number(ttlSeconds ?? 600);
+      scope = { maxAmount: dollarsToAtomic(product.priceUsd).toString(), merchantAllowlist: [MERCHANT], allowedCategories: [product.category] };
+    }
     const transactionData = encodeTransactionData(td);
-    const resource = `${VERIFIER_ID}/buy/${product.sku}`;
 
     const challenge = await createIdentityChallenge({
       encryptor, verifierId: VERIFIER_ID, resource, method: "GET",
-      ttlSeconds: Number(ttlSeconds ?? 600), transactionData,
+      ttlSeconds: ttl, transactionData,
     });
     const { payload, header } = buildProofRequired({
       challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`,
@@ -237,71 +331,48 @@ async function main() {
     intent = undefined;
     lastVerification = undefined;
     session = {
-      challengeValue: challenge.value, payload, transactionData,
-      sku: product.sku, requestedClaims: claims, ttlSeconds: Number(ttlSeconds ?? 600),
+      challengeValue: challenge.value, payload, transactionData, resource,
+      ...(grant ? {} : { sku }), grant, scope,
+      requestedClaims: claims, ttlSeconds: ttl,
     };
 
     const common = {
       mode: MODE,
+      flow,
+      grant,
       proofRequired: header,
       nonce: challenge.value,
       audience: VERIFIER_ID,
       requestedClaims: claims,
       dcql: { credentials: [{ id: PROOF_CREDENTIAL_ID, format: "dc+sd-jwt", claims: claims.map((c) => ({ path: [c] })) }] },
       transactionData: td, // decoded, for display
-      payment: { ...td.payload, amountUsd: product.priceUsd },
+      payment: { ...td.payload, amountUsd },
+      scope,
     };
 
-    if (MODE === "live") {
-      // The transaction_data SENT TO PROOF is configurable (PROOF_TX_DATA):
-      //   session  -> session-data (works in the live sandbox today)
-      //   payment-mandate -> Proof's payment-mandate:v1 (needs a real
-      //                      payment_instrument; otherwise Proof 500s)
-      //   none     -> omit transaction_data
-      // Our OWN payment binding (sealed into the x401 challenge above) is
-      // independent of this and always enforced.
-      const txMode = process.env.PROOF_TX_DATA ?? "payment-mandate";
-      let proofTd: string | undefined;
-      if (txMode === "payment-mandate") {
-        const network = process.env.X402_NETWORK ?? "eip155:84532";
-        proofTd = encodeTransactionData(
-          buildProofPaymentMandate({
-            amount: Number(product.priceUsd),
-            currency: process.env.PROOF_PAYMENT_CURRENCY ?? "USD",
-            payeeName: "Mock VeryGood-RX",
-            payeeWebsite: "https://verygood-rx.example",
-            promptSummary: `Authorize Mock VeryGood-RX to charge $${product.priceUsd} for ${product.name}.`,
-            instrument: {
-              type: process.env.PROOF_PAYMENT_INSTRUMENT_TYPE ?? "crypto",
-              id: process.env.PROOF_PAYMENT_INSTRUMENT_ID ?? `usdc:${network}:${signer.address}`,
-            },
-          }),
-        );
-      } else if (txMode !== "none") {
-        proofTd = encodeTransactionData(
-          buildSessionTransactionData({ ip_address: "203.0.113.0", device_id: `x402-${product.sku}` }),
-        );
-      }
-      const authInput = {
-        clientId: process.env.PROOF_CLIENT_ID ?? "",
-        loginHint: process.env.PROOF_LOGIN_HINT ?? "",
-        nonce: challenge.value,
-        responseMode: "fragment" as const,
-        redirectUri: process.env.PROOF_REDIRECT_URI ?? `http://localhost:${DEMO_PORT}/proof/callback`,
-        ...(proofTd !== undefined ? { transactionData: proofTd } : {}),
-        state: randomUUID(),
-        ...(process.env.PROOF_API_BASE ? { apiBase: process.env.PROOF_API_BASE } : {}),
-      };
+    if (usesProof(flow)) {
+      // Hosted Proof presentation via the official SDK: the human selectively
+      // discloses identity AND signs the payment-mandate on Proof's screen. Our
+      // own x401 payment binding (sealed above) is enforced regardless.
       try {
-        // Confidential client: mint a client-credentials access token (server-side)
-        // and resolve the hosted URL with it as a Bearer — neither the token nor
-        // the client secret reaches the browser. Public client (no secret): hand
-        // the browser the authorize URL directly.
-        const bearerToken = proofTokens ? await proofTokens.getToken() : undefined;
-        const authorizeUrl = bearerToken
-          ? await resolveProofAuthorizeRedirect({ ...authInput, bearerToken })
-          : buildProofAuthorizeUrl(authInput);
-        return res.json({ ...common, authorizeUrl, redirectUri: authInput.redirectUri });
+        const proofTd = proofTransactionData.paymentMandate({
+          payment_instrument: {
+            type: process.env.PROOF_PAYMENT_INSTRUMENT_TYPE ?? "crypto",
+            id: process.env.PROOF_PAYMENT_INSTRUMENT_ID ?? `usdc:${network}:${signer.address}`,
+            description: "Agent USDC wallet (Base Sepolia)",
+          },
+          payee: { name: "Mock VeryGood-RX", website: "https://verygood-rx.example" },
+          prompt_summary: promptSummary,
+          amount: Number(amountUsd),
+          currency: process.env.PROOF_PAYMENT_CURRENCY ?? "USD",
+        });
+        const authorizeUrl = await buildProofSdkAuthorizeUrl({
+          nonce: challenge.value,
+          loginHint: process.env.PROOF_LOGIN_HINT ?? "",
+          state: randomUUID(),
+          transactionData: proofTd,
+        });
+        return res.json({ ...common, authorizeUrl, redirectUri: callbackUri });
       } catch (err) {
         return res.status(502).json({ ...common, error: `Proof authorize failed: ${String(err)}` });
       }
@@ -314,18 +385,18 @@ async function main() {
     if (!session) return res.status(400).json({ error: "no authorization in progress" });
     const { vpToken } = req.body ?? {};
     if (!vpToken) return res.status(400).json({ error: "vpToken required" });
-    const product = findProduct(session.sku)!;
-    const resource = `${VERIFIER_ID}/buy/${product.sku}`;
-    console.log(`[demo] /api/authorize/complete: vp_token received (len=${String(vpToken).length}) for sku=${product.sku}`);
+    const { resource } = session;
+    const proofIdentity = usesProof(flow);
+    console.log(`[demo] /api/authorize/complete: vp_token received (len=${String(vpToken).length}) for ${session.grant ? "mandate-grant" : `sku=${session.sku}`} (flow=${flow})`);
     try {
       const { artifact } = packPresentation({ payload: session.payload, agentId: signer.address, vpToken });
       const verification = await verifyAuthorization({
-        artifact, encryptor, vcVerifier,
+        artifact, encryptor, vcVerifier: verifierFor(flow),
         expectedVerifierId: VERIFIER_ID, expectedResource: resource, expectedMethod: "GET",
-        // Local mode controls the exact claim names; live Proof decides which
+        // Local identity controls the exact claim names; live Proof decides which
         // claims its scope returns (e.g. age_equal_or_over vs age_over_21), so we
         // report what was disclosed rather than hard-requiring our names.
-        ...(MODE === "local" ? { requiredClaims: session.requestedClaims } : {}),
+        ...(proofIdentity ? {} : { requiredClaims: session.requestedClaims }),
         transactionData: session.transactionData,
       });
       lastVerification = verification;
@@ -334,14 +405,12 @@ async function main() {
         return res.status(403).json({ error: "presentation rejected", verification: summarizeVerification(verification) });
       }
       const presentationDigest = await sha256Base64url(vpToken);
+      // Single purchase -> a one-shot scope; delegated grant -> the broad,
+      // long-lived budget the agent then spends autonomously.
       intent = await service.issueIntentFromPresentation({
         authorization: verification,
         agentWallet: signer.address,
-        scope: {
-          maxAmount: dollarsToAtomic(product.priceUsd).toString(),
-          merchantAllowlist: [MERCHANT],
-          allowedCategories: [product.category],
-        },
+        scope: session.scope,
         ttlSeconds: session.ttlSeconds,
         presentationDigest,
       });
@@ -376,6 +445,54 @@ async function main() {
     } catch (err) {
       res.json({ ok: false, status: 0, body: { error: String(err) } });
     }
+  });
+
+  // --- delegated mandate: the agent buys autonomously under one standing Intent,
+  //     NO per-purchase human approval. The human's presigned presentation (the
+  //     signed Intent) IS the authorization; the merchant enforces the cumulative
+  //     cap, so an over-budget buy is denied without anyone in the loop. ---
+  app.post("/api/agent/run", async (req, res) => {
+    if (!intent) return res.status(401).json({ error: "no standing mandate — grant one first" });
+    const requested: string[] = Array.isArray(req.body?.skus) && req.body.skus.length
+      ? req.body.skus
+      : ["allergy-relief-24", "vitamin-d3-2000", "ibuprofen-200", "toothpaste-mint"];
+    const payingFetch = await createPayingFetch(signer);
+    const mandateHeader = Buffer.from(JSON.stringify(intent)).toString("base64");
+    const capAtomic = BigInt(intent.scope.maxAmount);
+    let spentAtomic = 0n;
+    const purchases: unknown[] = [];
+
+    for (const sku of requested) {
+      const product = findProduct(sku);
+      if (!product) { purchases.push({ sku, ok: false, status: 400, reason: "unknown sku" }); continue; }
+      const headers: Record<string, string> = {
+        "Idempotency-Key": randomUUID(),
+        "X-Authorization-Mandate": mandateHeader,
+      };
+      try {
+        const r = await payingFetch(`${merchantUrl}/buy/${sku}`, { headers });
+        const body = (await r.json().catch(() => ({}))) as { receipt?: { paymentNonce?: string }; error?: string; violations?: string[] };
+        const nonce = body?.receipt?.paymentNonce;
+        const order = r.ok && nonce ? (await pollOrder(nonce)) as { state?: string } | undefined : undefined;
+        const settled = order?.state === "SETTLED";
+        if (settled) spentAtomic += dollarsToAtomic(product.priceUsd);
+        purchases.push({
+          sku, name: product.name, priceUsd: product.priceUsd, category: product.category,
+          ok: r.ok, status: r.status, settled,
+          ...(r.ok ? {} : { reason: body?.error ?? "denied", violations: body?.violations ?? [] }),
+        });
+      } catch (err) {
+        purchases.push({ sku, ok: false, status: 0, reason: String(err) });
+      }
+    }
+
+    res.json({
+      intent: intentSummary(),
+      capAtomic: capAtomic.toString(),
+      spentAtomic: spentAtomic.toString(),
+      remainingAtomic: (capAtomic - spentAtomic).toString(),
+      purchases,
+    });
   });
 
   app.post("/api/reset", (_req, res) => {

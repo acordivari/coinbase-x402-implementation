@@ -51,10 +51,27 @@ A browser wallet (Vite + Svelte) shows the whole handshake on screen: the human
 selectively discloses identity claims via a **DCQL** query **and** authorizes the
 exact payment (`transaction_data`) in one SD-JWT-VC presentation; the verifier
 checks the credential + nonce + payment binding, issues a signed HAM Intent, and
-the agent settles over x402. `PROOF_MODE=local` self-issues Proof-shaped
-credentials and does selective disclosure in-browser (offline); `PROOF_MODE=live`
-drives the real Proof hosted presentation against your sandbox (set
-`PROOF_CLIENT_ID`, `PROOF_LOGIN_HINT`, and a registered `PROOF_REDIRECT_URI`).
+the agent settles over x402.
+
+### Three wallet workflows (`WALLET_FLOW`, switchable live in the UI)
+
+1. **Self-issued** — browser-held local SD-JWT-VC, selective disclosure in-browser,
+   you approve each purchase. Fully offline (`PROOF_MODE=local`).
+2. **Proof-hosted** — the real Proof hosted presentation, driven by the official
+   **`@proof.com/proof-vc-common`** SDK (`getAuthorizationRequestURL` + PAR +
+   `verifyVPToken`, pinned to Proof's trust store via `trustRoot`) with Proof's
+   **`<proof-verify-id>`** web component (`@proof.com/proof-vc-web`). Set
+   `PROOF_CLIENT_ID`/`PROOF_CLIENT_SECRET`, `PROOF_LOGIN_HINT`, `PROOF_ENVIRONMENT`.
+3. **Delegated (autonomous)** — the headline path: the human presents **once** to
+   sign a durable, scoped **mandate** (allowlist + budget cap + expiry); the agent
+   then buys **many** times over x402 with **no per-purchase approval** — the
+   presigned identity is the standing authorization. The merchant's cumulative-cap
+   ledger denies an over-budget buy on its own.
+
+```bash
+# the autonomous (delegated-mandate) demo, fully offline:
+WALLET_FLOW=delegated PROOF_MODE=local FACILITATOR_MODE=mock npm run demo
+```
 
 ## Why TypeScript
 
@@ -130,10 +147,14 @@ both **selectively discloses** identity (driven by a **DCQL** query) **and**
 The disclosed identity becomes the HAM principal; the merchant's x402 paywall and
 settlement are unchanged.
 
-- **New seam** (`packages/credentials`): a `VerifiableCredentialVerifier` with two
+- **New seam** (`packages/credentials`): a `VerifiableCredentialVerifier` with three
   implementations behind one interface — `localVcVerifier` (self-issued SD-JWT-VC,
-  offline/CI) and `proofVcVerifier` (live Proof). Mirrors the facilitator/identity
-  seams; selected by `PROOF_MODE=local|live`.
+  offline/CI), `proofSdkVcVerifier` (live Proof via the official
+  `@proof.com/proof-vc-common` SDK), and `proofVcVerifier` (hand-rolled x5c fallback).
+  Mirrors the facilitator/identity seams; selected by `PROOF_MODE` + `proof.useSdk`.
+- **Three wallet workflows** (`WALLET_FLOW`): self-issued, Proof-hosted (SDK +
+  `<proof-verify-id>` web component), and **delegated** — a presigned, durable,
+  scoped mandate the agent spends autonomously with no per-purchase approval.
 - **Selective disclosure (DCQL):** credentials are SD-JWT-VC; the verifier names the
   claims it wants and the wallet reveals only those — e.g. disclose `age_over_21`
   without revealing `birth_date`.
@@ -141,9 +162,9 @@ settlement are unchanged.
   x401 challenge, and (live) Proof binds the `payment-mandate` inside the
   holder-signed key-binding JWT — cryptographic proof the human approved *this*
   payment, not just "some payment".
-- **Issuer trust:** Proof signs with an ES256 **x5c** certificate chain; the verifier
-  checks the leaf signature + chain links and **pins** the chain to a trusted Proof
-  CA (configurable fingerprint or root PEM).
+- **Issuer trust:** Proof signs with an ES256 **x5c** certificate chain; the live SDK
+  verifier pins it to Proof's committed trust store via `trustRoot`
+  (`development`/`production`). The fallback verifier pins by CA fingerprint/root PEM.
 
 Flow: `PROOF-REQUIRED (DCQL + payment) → wallet presentation (vp_token) → verify
 (credential + holder + nonce + payment) → signed HAM Intent → x402 settlement`. The

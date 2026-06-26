@@ -15,6 +15,7 @@
     "@agentic-payments/identity": "*",
     "@agentic-payments/merchant": "*",
     "@agentic-payments/shared": "*",
+    "@proof.com/proof-vc-web": "^0.2.0",
     "express": "^4.21.2"
   },
   "devDependencies": {

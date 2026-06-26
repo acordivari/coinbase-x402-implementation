@@ -95,7 +95,7 @@ replayed against a different amount or merchant** (`txDataBound`).
 | Property | Check |
 |---|---|
 | Challenge authenticity / freshness | `verifier.verifyChallenge` — verifier id, resource, method, expiry, encryptor-sealed state |
-| Genuine credential | SD-JWT-VC issuer signature verified via the JWT `x5c` chain (ES256), with chain links checked and the chain **pinned to a trusted Proof CA** (SHA-256 fingerprint and/or root PEM). Local mode uses a resolved issuer key instead. |
+| Genuine credential | Live: `@proof.com/proof-vc-common` `verifyVPToken` verifies the SD-JWT-VC issuer `x5c` chain (ES256) against Proof's committed trust store (`trustRoot`). (The hand-rolled `proofVcVerifier` — chain pinned to a CA fingerprint/root PEM — remains as an offline fallback.) Local mode uses a resolved issuer key instead. |
 | Holder actually presented it | KB-JWT verified against the credential's `cnf` key (`holderBound`) |
 | Anti-replay | KB-JWT `nonce` == challenge value (`nonceBound`) |
 | Right info disclosed | DCQL `requiredClaims` all present |
@@ -108,16 +108,44 @@ never runs.
 
 ## 7. Seam design (matches the repo doctrine)
 
-`VerifiableCredentialVerifier` is a swappable seam with two implementations
+`VerifiableCredentialVerifier` is a swappable seam with **three** implementations
 behind one interface (like `FacilitatorClient` and `IdentityVerifier`):
 
-| Mode | Issuer | Verifier | Wallet |
-|---|---|---|---|
-| `local` | `LocalVcIssuer` (self-issued SD-JWT-VC) | `localVcVerifier` (pinned trust key) | `LocalWallet` (in-browser) |
-| `live` | Proof | `proofVcVerifier` (Proof issuer trust) | Proof hosted (OID4VP redirect) |
+| Verifier | Trust source | Used by |
+|---|---|---|
+| `localVcVerifier` | a pinned self-issuer key (`LocalVcIssuer`) | the offline / self-issued path, tests, CI |
+| `proofSdkVcVerifier` | `@proof.com/proof-vc-common` `verifyVPToken`, pinned to Proof's committed trust store via `trustRoot` | the live Proof-hosted path |
+| `proofVcVerifier` | hand-rolled x5c chain walk pinned to a Proof CA fingerprint | offline x5c fallback / trust-pin override |
 
-`createVcVerifier({ mode })` selects from `PROOF_MODE`. Mocks implement the real
-interface, so tests exercise the same verification path as live.
+`createVcVerifier({ mode, proof })` selects one (`PROOF_MODE` + `proof.useSdk`).
+Mocks implement the real interface, so tests exercise the same verification path
+as live.
+
+### The three wallet workflows
+
+The demo exposes a `WALLET_FLOW` selector (switchable live in the UI) over the
+same x401 → HAM → x402 spine:
+
+| Workflow | Identity | Per-purchase human? | Drives |
+|---|---|---|---|
+| **Self-issued** | browser-held local SD-JWT-VC | yes (in-browser consent) | `localVcVerifier` + `LocalWallet` |
+| **Proof-hosted** | real Proof wallet | yes (Proof hosted screen) | `proof-vc-common` `getAuthorizationRequestURL` + `verifyVPToken`; the official `<proof-verify-id>` web component (`proof-vc-web`) launches the request with our PAR-built URL |
+| **Delegated** (autonomous) | one upfront grant (either of the above) | **no** | a durable, scoped `IntentMandate` the agent spends within |
+
+### Delegated mandate (presigned identity = authorization)
+
+The human makes **one** selective-disclosure presentation that authorizes a
+*budget grant* (a `payment-mandate` whose `prompt_summary` is the standing
+instruction and whose amount is the cap) instead of a single payment. The
+Authorization Service issues **one long-lived** `IntentMandate` (`merchantAllowlist`
++ `allowedCategories` + `maxAmount` + a `MANDATE_TTL` expiry). The agent then
+settles **many** purchases over x402 with **no further human approval** — the
+signed Intent is the standing authorization. The merchant's existing
+`IntentSpendLedger` enforces the **cumulative cap across purchases**, so an
+over-budget or out-of-scope buy is denied on its own, with nobody in the loop
+(`POST /api/agent/run`; `test/e2e-delegated.test.ts`). This is the up-front
+authorization model HAM was designed for — a headless agent can't complete a
+human-in-the-loop redirect mid-`/buy`, so the human pre-authorizes a scope once.
 
 ---
 
@@ -125,21 +153,24 @@ interface, so tests exercise the same verification path as live.
 
 | Threat | Defense |
 |---|---|
-| Agent acts with no human behind it | No valid presentation ⇒ no Intent ⇒ refused. |
+| Agent acts with no human behind it | No valid presentation ⇒ no Intent ⇒ refused. In the **delegated** flow the human still presents once up front; the agent's autonomy is bounded by that signed scope + cap + expiry. |
 | Tampered / forged credential | SD-JWT issuer signature must verify against a trusted key. |
 | Stolen presentation replayed | KB-JWT nonce bound to a single-use challenge. |
 | Presentation reused for a different payment | `transaction_data` digest binding (`txDataBound`). |
 | Over-disclosure | DCQL selective disclosure; wallet reveals only requested claims. |
 | A different wallet rides the Intent | Merchant checks `payer == agentWallet` (existing HAM). |
 
-**Limits (sandbox):** issuer trust pins the x5c chain to Proof's CA by SHA-256
-fingerprint — by default the **Fairfax issuing CA** (the leaf rotates; the root
-isn't shipped in the token). Pin the published **Proof Root CA** instead via
-`PROOF_TRUSTED_CA_FILE` for production. The holder presents once per purchase (a
-reusable x401 token-exchange flow is supported by the SDK but not yet wired).
-Note: live Proof actually binds the payment *inside* the holder-signed KB-JWT
-(`payment_mandate_v1`), which we surface as `paymentApproved`; our independent
-challenge-sealed digest binding is enforced in addition.
+**Limits (sandbox):** the SDK verifier (`proofSdkVcVerifier`) pins to Proof's
+committed trust store via `trustRoot` (`development` for the Fairfax sandbox,
+`production` for prod) — so the open "pin the actual Root CA" item is resolved for
+the live path. The legacy `proofVcVerifier` still pins by SHA-256 fingerprint
+(default: Fairfax issuing CA) as an offline fallback. In the **self-issued** and
+**proof-hosted** flows the holder presents once per purchase; the **delegated**
+flow is exactly the reusable-mandate model — one presentation authorizes many
+autonomous purchases within the signed scope/cap/expiry. Note: live Proof also
+binds the payment *inside* the holder-signed KB-JWT (`payment_mandate_v1`), which
+we surface as `paymentApproved`; our independent challenge-sealed digest binding
+is enforced in addition.
 
 ---
 

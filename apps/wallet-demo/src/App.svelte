@@ -15,6 +15,7 @@
     type HolderKeys,
   } from "./lib/walletClient";
   import { DEMO_HOLDERS } from "@agentic-payments/credentials/browser";
+  import "@proof.com/proof-vc-web"; // registers Proof's <proof-verify-id> web component
 
   let me = $state<any>({ mode: "local", claimUniverse: [] });
   let catalog = $state<any[]>([]);
@@ -35,6 +36,27 @@
   let intent = $state<any>(undefined);
   let busy = $state(false);
   let pasted = $state("");
+
+  // Workflow axis: identity == "proof" means the Proof hosted SDK path (vs the
+  // local self-issued browser wallet); delegated == the autonomous mandate flow.
+  const proofIdentity = $derived(me.identity === "proof");
+  const delegated = $derived(me.flow === "delegated");
+  let budgetUsd = $state("5.00");
+  let agentRun = $state<any>(undefined);
+
+  // Proof's official web component (@proof.com/proof-vc-web). We feed it our
+  // server-built (PAR) authorize URL via `resolveAuthorizationUrl` so the client
+  // secret stays server-side and the payment-mandate URL avoids size limits.
+  let proofBtn = $state<any>(undefined);
+  $effect(() => {
+    if (proofBtn) proofBtn.resolveAuthorizationUrl = async () => authSession?.authorizeUrl ?? null;
+  });
+
+  const FLOW_LABEL: Record<string, string> = {
+    "self-issued": "Self-issued",
+    "proof-hosted": "Proof-hosted",
+    "delegated": "Delegated (autonomous)",
+  };
 
   // Live mode: when the redirect_uri is a page we don't control, the user pastes
   // the returned URL (or raw vp_token) here to bring the presentation back.
@@ -62,17 +84,17 @@
   const previewMissing = $derived(requested.filter((c) => !heldNames.includes(c)));
 
   const steps = $derived.by(() => {
-    const provisioned = me.mode === "live" || !!credential;
+    const provisioned = proofIdentity || !!credential;
     const settled = orders.some((o) => o.state === "SETTLED");
     const paying = !!intent && !settled;
     const s = (status: any, title: string, sub?: string) => ({ status, title, sub });
     return [
-      s(provisioned ? "done" : "active", "Provision wallet", me.mode === "live" ? "Proof-hosted credential" : credential ? "credential held in browser" : "issue a credential"),
-      s(authSession ? "done" : provisioned ? "active" : "todo", "Request authorization", "PROOF-REQUIRED + payment transaction_data"),
+      s(provisioned ? "done" : "active", "Provision wallet", proofIdentity ? "Proof-hosted credential" : credential ? "credential held in browser" : "issue a credential"),
+      s(authSession ? "done" : provisioned ? "active" : "todo", delegated ? "Request mandate grant" : "Request authorization", "PROOF-REQUIRED + payment transaction_data"),
       s(present ? "done" : authSession ? "active" : "todo", "Present credential", "selective disclosure (DCQL)"),
       s(verification ? (verification.ok ? "done" : "bad") : present ? "active" : "todo", "Verify presentation", "challenge + VC + payment binding"),
-      s(intent ? "done" : verification?.ok ? "active" : "todo", "Issue HAM Intent", "bind verified identity → agent scope"),
-      s(settled ? "done" : paying ? "active" : "todo", "Pay via x402", "EIP-3009 USDC authorization"),
+      s(intent ? "done" : verification?.ok ? "active" : "todo", delegated ? "Sign standing mandate" : "Issue HAM Intent", "bind verified identity → agent scope"),
+      s(settled ? "done" : paying ? "active" : "todo", delegated ? "Agent buys autonomously" : "Pay via x402", delegated ? "no per-purchase human approval" : "EIP-3009 USDC authorization"),
       s(settled ? "done" : "todo", "Settle on-chain", "facilitator submits the transfer"),
     ];
   });
@@ -82,7 +104,7 @@
     const cat = await api("/api/catalog");
     catalog = cat.products ?? [];
     selectedSku = catalog[0]?.sku ?? "";
-    if (me.mode === "local") {
+    if (me.identity !== "proof") {
       keys = await ensureHolderKeys();
       credential = loadCredential();
     }
@@ -131,13 +153,34 @@
     } finally { busy = false; }
   }
 
-  async function startAuthorize() {
-    if (!selectedSku) return;
-    busy = true; present = undefined; verification = undefined; intent = undefined;
+  async function selectFlow(f: string) {
+    if (f === me.flow || busy) return;
+    busy = true;
     try {
-      authSession = await api("/api/authorize/start", { sku: selectedSku, requestedClaims: requested, ttlSeconds: ttl });
-      logLine(`PROOF-REQUIRED issued · ${authSession.requestedClaims.length} claims requested · payment ${usd(authSession.payment.amount)}`, "info");
-      if (me.mode === "live") {
+      const r = await api("/api/flow", { flow: f });
+      if (r.error) return logLine(r.error, "bad");
+      authSession = undefined; present = undefined; verification = undefined; intent = undefined; agentRun = undefined;
+      await refreshMe();
+      if (me.identity !== "proof") { keys = await ensureHolderKeys(); credential = loadCredential(); }
+      logLine(`Switched to the ${FLOW_LABEL[f] ?? f} workflow.`, "info");
+    } finally { busy = false; }
+  }
+
+  async function startAuthorize() {
+    if (!delegated && !selectedSku) return;
+    busy = true; present = undefined; verification = undefined; intent = undefined; agentRun = undefined;
+    try {
+      authSession = await api("/api/authorize/start", {
+        sku: selectedSku, requestedClaims: requested, ttlSeconds: ttl,
+        ...(delegated ? { budgetUsd } : {}),
+      });
+      logLine(
+        delegated
+          ? `Mandate-grant PROOF-REQUIRED issued · budget ${usd(authSession.payment.amount)} · ${authSession.requestedClaims.length} claims`
+          : `PROOF-REQUIRED issued · ${authSession.requestedClaims.length} claims requested · payment ${usd(authSession.payment.amount)}`,
+        "info",
+      );
+      if (proofIdentity) {
         logLine("Opening Proof hosted wallet…", "info");
         const w = window.open(authSession.authorizeUrl, "proof", "width=520,height=760");
         if (!w) { logLine("Popup blocked — redirecting this tab to Proof…", "info"); window.location.href = authSession.authorizeUrl; }
@@ -159,7 +202,7 @@
   }
 
   async function onVpToken(vpToken: string) {
-    if (me.mode === "live") {
+    if (proofIdentity) {
       const decoded = await decodeDisclosed(vpToken);
       present = { disclosed: decoded.disclosed, withheld: [], missing: [], vpToken, subject: decoded.subject };
       logLine(`Proof returned a presentation disclosing [${decoded.disclosed.join(", ")}]`, "ok");
@@ -168,8 +211,28 @@
     verification = r.verification ?? verification;
     if (r.error) { logLine(`Verification rejected: ${r.error}`, "bad"); return; }
     intent = r.intent;
-    logLine(`Presentation verified → HAM Intent signed for ${intent?.principal?.email ?? intent?.principal?.sub}`, "ok");
+    logLine(
+      delegated
+        ? `Standing mandate signed for ${intent?.principal?.email ?? intent?.principal?.sub} — agent may now spend up to ${usd(intent?.scope?.maxAmount)} autonomously`
+        : `Presentation verified → HAM Intent signed for ${intent?.principal?.email ?? intent?.principal?.sub}`,
+      "ok",
+    );
     refreshMe();
+  }
+
+  async function runAgent() {
+    if (!intent) return;
+    busy = true;
+    try {
+      logLine("Agent transacting autonomously under the standing mandate (no human approval)…", "info");
+      agentRun = await api("/api/agent/run", {});
+      for (const p of agentRun.purchases ?? []) {
+        if (p.settled) logLine(`✓ ${p.name} ($${p.priceUsd}) settled — presigned mandate, no human in the loop`, "ok");
+        else logLine(`✗ ${p.sku} denied (HTTP ${p.status}): ${p.reason ?? ""}${(p.violations?.length ? " — " + p.violations.join("; ") : "")}`, "bad");
+      }
+      logLine(`Budget: spent ${usd(agentRun.spentAtomic)} of ${usd(agentRun.capAtomic)} · ${usd(agentRun.remainingAtomic)} remaining`, "info");
+      refreshOrders();
+    } finally { busy = false; }
   }
 
   async function pay() {
@@ -186,7 +249,7 @@
 
   async function reset() {
     await api("/api/reset", {});
-    authSession = undefined; present = undefined; verification = undefined; intent = undefined;
+    authSession = undefined; present = undefined; verification = undefined; intent = undefined; agentRun = undefined;
     logLine("Session reset.", "info");
     refreshMe();
   }
@@ -205,13 +268,34 @@
 </header>
 
 <div class="wrap">
+  <div class="flowbar">
+    <span class="mut" style="font-size:12px">Wallet workflow</span>
+    <div class="seg">
+      {#each (me.flows ?? []) as f}
+        <button
+          class="seg-btn {me.flow === f ? 'on' : ''}"
+          disabled={busy || (f === 'proof-hosted' && !me.proofLiveReady)}
+          title={f === 'proof-hosted' && !me.proofLiveReady ? 'Set PROOF_CLIENT_ID + PROOF_CLIENT_SECRET and PROOF_MODE=live' : ''}
+          onclick={() => selectFlow(f)}
+        >{FLOW_LABEL[f] ?? f}</button>
+      {/each}
+    </div>
+    <span class="mut" style="font-size:12px">
+      {#if me.flow === 'self-issued'}browser-held credential · you approve each purchase
+      {:else if me.flow === 'proof-hosted'}real Proof wallet (SDK) · you approve each purchase
+      {:else}one signed mandate · the agent then buys autonomously{/if}
+    </span>
+  </div>
+</div>
+
+<div class="wrap">
   <div class="grid">
     <!-- LEFT: wallet + authorization -->
     <div class="col">
       <div class="card">
         <h2><span class="step">1</span> Wallet</h2>
-        {#if me.mode === "live"}
-          <p class="note">Live mode: the credential lives in your <b>Proof</b> wallet. Selective disclosure happens on Proof's hosted flow; we decode the returned presentation to visualize it.</p>
+        {#if proofIdentity}
+          <p class="note">Proof-hosted: the credential lives in your <b>Proof</b> wallet. Selective disclosure happens on Proof's hosted flow (driven by <span class="mono">@proof.com/proof-vc-common</span>); we decode the returned presentation to visualize it.</p>
         {:else}
           <div class="row spread">
             <div class="row">
@@ -235,18 +319,28 @@
       </div>
 
       <div class="card">
-        <h2><span class="step">2</span> Choose purchase &amp; what to disclose</h2>
-        <div>
-          {#each catalog as p}
-            <div class="prod {p.sku === selectedSku ? 'sel' : ''}">
-              <label class="row" style="gap:8px;cursor:pointer">
-                <input type="radio" name="sku" value={p.sku} bind:group={selectedSku} />
-                <span><b>{p.name}</b><br /><span class="mut" style="font-size:12px">{p.sku} · {p.category}</span></span>
-              </label>
-              <span class="pill">${p.priceUsd}</span>
-            </div>
-          {/each}
-        </div>
+        {#if delegated}
+          <h2><span class="step">2</span> Grant a standing mandate &amp; what to disclose</h2>
+          <p class="note" style="margin:0 0 10px">Authorize <b>once</b>: the human's presentation signs a budget the agent then spends autonomously — no per-purchase approval. The signed Intent (allowlist + cap + expiry) is the standing authorization.</p>
+          <div class="row spread">
+            <div class="row"><span class="mut">Budget (USDC)</span><input type="number" step="0.25" bind:value={budgetUsd} min="0.25" style="width:100px" /></div>
+            <span class="pill">expires in {Math.round((me.mandateTtl ?? 86400) / 3600)}h</span>
+          </div>
+          <p class="note" style="margin:8px 0 0">Scope: all catalog categories at Mock VeryGood-RX, up to the budget cap.</p>
+        {:else}
+          <h2><span class="step">2</span> Choose purchase &amp; what to disclose</h2>
+          <div>
+            {#each catalog as p}
+              <div class="prod {p.sku === selectedSku ? 'sel' : ''}">
+                <label class="row" style="gap:8px;cursor:pointer">
+                  <input type="radio" name="sku" value={p.sku} bind:group={selectedSku} />
+                  <span><b>{p.name}</b><br /><span class="mut" style="font-size:12px">{p.sku} · {p.category}</span></span>
+                </label>
+                <span class="pill">${p.priceUsd}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
         <div class="divider"></div>
         <div class="mut" style="margin-bottom:6px">Identity claims to request (DCQL):</div>
         <div class="row" style="gap:6px">
@@ -255,8 +349,8 @@
           {/each}
         </div>
         <div class="row spread" style="margin-top:12px">
-          <div class="row"><span class="mut">TTL</span><input type="number" bind:value={ttl} min="60" style="width:90px" /><span class="mut">sec</span></div>
-          <button onclick={startAuthorize} disabled={busy || (me.mode === 'local' && !credential)}>Request authorization</button>
+          <div class="row"><span class="mut">TTL</span><input type="number" bind:value={ttl} min="60" style="width:90px" disabled={delegated} /><span class="mut">sec</span></div>
+          <button onclick={startAuthorize} disabled={busy || (!proofIdentity && !credential)}>{delegated ? "Request mandate grant" : "Request authorization"}</button>
         </div>
       </div>
 
@@ -265,7 +359,7 @@
 
         <div class="card fade-in">
           <h2><span class="step">3</span> Consent &amp; selective disclosure</h2>
-          {#if me.mode === "local"}
+          {#if !proofIdentity}
             <div class="mut" style="margin-bottom:6px">The wallet will reveal only:</div>
             <div class="row" style="gap:6px">
               {#each previewDisclose as c}<span class="chip-claim claim-disclosed">{c}</span>{/each}
@@ -278,6 +372,10 @@
             <button style="margin-top:12px" onclick={approveLocal} disabled={busy || !!present}>Approve &amp; present</button>
           {:else}
             <p class="note">Approve the presentation in the Proof window. If the demo's callback is registered as your redirect URI it returns automatically; otherwise copy the URL Proof lands on (it contains <span class="mono">#vp_token=…</span>) and paste it below.</p>
+            <div style="margin:8px 0">
+              <proof-verify-id bind:this={proofBtn} theme="primary" size="medium"></proof-verify-id>
+              <span class="mut" style="font-size:12px;margin-left:8px">official Proof button (proof-vc-web), if the popup was blocked</span>
+            </div>
             <textarea
               bind:value={pasted}
               placeholder="Paste the redirect URL (…#vp_token=…) or the raw vp_token"
@@ -292,7 +390,29 @@
         </div>
       {/if}
 
-      {#if intent}
+      {#if intent && delegated}
+        <div class="card fade-in">
+          <h2><span class="step">4</span> Autonomous agent</h2>
+          <p class="note" style="margin:0 0 10px">The standing mandate is signed. The agent now buys over x402 with <b>no further human approval</b> — the presigned identity is the authorization. The merchant enforces the cumulative cap, so an over-budget buy is denied on its own.</p>
+          <div class="row spread" style="margin-bottom:10px">
+            <span class="pill">cap {usd(intent?.scope?.maxAmount)}</span>
+            {#if agentRun}
+              <span class="pill">spent {usd(agentRun.spentAtomic)}</span>
+              <span class="pill">left {usd(agentRun.remainingAtomic)}</span>
+            {/if}
+          </div>
+          <button class="alt" onclick={runAgent} disabled={busy}>Run agent (autonomous buys)</button>
+          {#if agentRun}
+            <div class="divider"></div>
+            {#each agentRun.purchases as p}
+              <div class="prod">
+                <span><b>{p.name ?? p.sku}</b><br /><span class="mut" style="font-size:12px">{p.sku}{p.category ? " · " + p.category : ""}</span></span>
+                <span class="pill" style={p.settled ? "color:var(--ok)" : "color:var(--warn)"}>{p.settled ? "settled $" + p.priceUsd : "denied"}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {:else if intent}
         <div class="card fade-in">
           <h2><span class="step">4</span> Pay</h2>
           <p class="note" style="margin:0 0 10px">Identity + payment authorized. The agent now settles <b>{selectedProduct?.name}</b> ({usd(authSession?.payment?.amount)}) over x402 — gated by the signed Intent.</p>
