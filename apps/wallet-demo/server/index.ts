@@ -4,9 +4,9 @@
  *
  *   - boots the mock-VeryGood-RX merchant in-process (HAM mandate enforcement ON),
  *     sharing the Authorization Service's signing key so issued Intents verify
- *   - hosts the x401 *verifier*: builds the PROOF-REQUIRED challenge with the
+ *   - hosts the x401 *verifier*: builds the PROOF-REQUEST challenge with the
  *     payment's transaction_data sealed in, and verifies the returned
- *     presentation (challenge + VC + payment binding) before issuing an Intent
+ *     credential result (challenge + VC + payment binding) before issuing an Intent
  *   - PROOF_MODE=local : issues self-issued SD-JWT-VCs to the in-browser wallet
  *     and verifies them against a local trust anchor (offline, deterministic)
  *   - PROOF_MODE=live  : returns a Proof authorize URL (hosted OID4VP redirect)
@@ -42,7 +42,7 @@ import {
 } from "@agentic-payments/identity";
 import {
   buildPaymentMandateTransactionData,
-  buildProofRequired,
+  buildProofRequest,
   buildProofSdkAuthorizeUrl,
   proofTransactionData,
   createEncryptor,
@@ -51,7 +51,7 @@ import {
   encodeTransactionData,
   generateEs256Keys,
   LocalVcIssuer,
-  packPresentation,
+  packCredentialResult,
   PROOF_BASIC_SCOPE,
   PROOF_CREDENTIAL_ID,
   PROOF_ID_CLAIM_KEYS,
@@ -543,7 +543,7 @@ export async function createDemoApp(): Promise<DemoApp> {
   });
 
   // --- start authorization: build the payment (single buy) or budget grant
-  //     (delegated), seal it into an x401 challenge, return PROOF-REQUIRED ---
+  //     (delegated), seal it into an x401 challenge, return PROOF-REQUEST ---
   app.post("/api/authorize/start", async (req, res) => {
     const sess = res.locals.sess as ClientSession;
     const { sku, requestedClaims, ttlSeconds, budgetUsd, categories } = req.body ?? {};
@@ -609,7 +609,7 @@ export async function createDemoApp(): Promise<DemoApp> {
       encryptor, verifierId: VERIFIER_ID, resource, method: "GET",
       ttlSeconds: ttl, transactionData,
     });
-    const { payload, header } = buildProofRequired({
+    const { payload, header } = buildProofRequest({
       challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`,
       scope: PROOF_BASIC_SCOPE, requestId: "proof-id-v1",
     });
@@ -626,7 +626,7 @@ export async function createDemoApp(): Promise<DemoApp> {
       mode: MODE,
       flow: sess.flow,
       grant,
-      proofRequired: header,
+      proofRequest: header,
       nonce: challenge.value,
       audience: VERIFIER_ID,
       requestedClaims: claims,
@@ -677,7 +677,7 @@ export async function createDemoApp(): Promise<DemoApp> {
     const proofIdentity = usesProof(sess.flow);
     console.log(`[demo] /api/authorize/complete: vp_token received (len=${String(vpToken).length}) for ${attempt.grant ? "mandate-grant" : `sku=${attempt.sku}`} (flow=${sess.flow})`);
     try {
-      const { artifact } = packPresentation({ payload: attempt.payload, agentId: signer.address, vpToken });
+      const { artifact } = packCredentialResult({ payload: attempt.payload, agentId: signer.address, vpToken });
       const verification = await verifyAuthorization({
         artifact, encryptor, vcVerifier: verifierFor(sess.flow),
         expectedVerifierId: VERIFIER_ID, expectedResource: resource, expectedMethod: "GET",

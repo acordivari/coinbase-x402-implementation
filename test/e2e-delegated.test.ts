@@ -26,7 +26,7 @@ import {
 import {
   buildPaymentMandateTransactionData,
   buildProofIdDcqlQuery,
-  buildProofRequired,
+  buildProofRequest,
   createEncryptor,
   createIdentityChallenge,
   encodeTransactionData,
@@ -34,7 +34,7 @@ import {
   localVcVerifier,
   LocalVcIssuer,
   LocalWallet,
-  packPresentation,
+  packCredentialResult,
   PROOF_BASIC_SCOPE,
   PROOF_CREDENTIAL_ID,
   PROOF_ID_CLAIM_KEYS,
@@ -108,9 +108,9 @@ async function grantMandate(opts: {
   );
   const resource = `${VERIFIER_ID}/mandate/grant`;
   const challenge = await createIdentityChallenge({ encryptor, verifierId: VERIFIER_ID, resource, method: "GET", ttlSeconds: 600, transactionData: td });
-  const { payload } = buildProofRequired({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
+  const { payload } = buildProofRequest({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
   const present = await opts.wallet.present({ query: buildProofIdDcqlQuery(opts.requestedClaims), nonce: challenge.value, audience: VERIFIER_ID });
-  const { artifact } = packPresentation({ payload, agentId: opts.agentWallet, vpToken: present.vpToken });
+  const { artifact } = packCredentialResult({ payload, agentId: opts.agentWallet, vpToken: present.vpToken });
   const authorization = await verifyAuthorization({
     artifact, encryptor, vcVerifier,
     expectedVerifierId: VERIFIER_ID, expectedResource: resource, expectedMethod: "GET",

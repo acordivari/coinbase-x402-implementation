@@ -34,7 +34,7 @@ import {
 } from "@agentic-payments/identity";
 import {
   buildProofIdDcqlQuery,
-  buildProofRequired,
+  buildProofRequest,
   buildPaymentMandateTransactionData,
   createEncryptor,
   createIdentityChallenge,
@@ -43,7 +43,7 @@ import {
   localVcVerifier,
   LocalVcIssuer,
   LocalWallet,
-  packPresentation,
+  packCredentialResult,
   PROOF_BASIC_SCOPE,
   PROOF_CREDENTIAL_ID,
   PROOF_ID_CLAIM_KEYS,
@@ -126,9 +126,9 @@ async function grantMandate(agentWallet: `0x${string}`, capUsd: string): Promise
   const td = encodeTransactionData(buildPaymentMandateTransactionData({ amount, currency: "USDC", merchant: MERCHANT_A, sku: "mandate-grant" }));
   const resource = `${VERIFIER_ID}/mandate/grant`;
   const challenge = await createIdentityChallenge({ encryptor, verifierId: VERIFIER_ID, resource, method: "GET", ttlSeconds: 600, transactionData: td });
-  const { payload } = buildProofRequired({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
+  const { payload } = buildProofRequest({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
   const present = await wallet.present({ query: buildProofIdDcqlQuery(["given_name", "age_over_21"]), nonce: challenge.value, audience: VERIFIER_ID });
-  const { artifact } = packPresentation({ payload, agentId: agentWallet, vpToken: present.vpToken });
+  const { artifact } = packCredentialResult({ payload, agentId: agentWallet, vpToken: present.vpToken });
   const authorization = await verifyAuthorization({
     artifact, encryptor, vcVerifier,
     expectedVerifierId: VERIFIER_ID, expectedResource: resource, expectedMethod: "GET",

@@ -206,7 +206,7 @@ settlement are unchanged.
   verifier pins it to Proof's committed trust store via `trustRoot`
   (`development`/`production`). The fallback verifier pins by CA fingerprint/root PEM.
 
-Flow: `PROOF-REQUIRED (DCQL + payment) → wallet presentation (vp_token) → verify
+Flow: `PROOF-REQUEST (DCQL + payment) → wallet presentation (vp_token) → verify
 (credential + holder + nonce + payment) → signed HAM Intent → x402 settlement`. The
 identity source for HAM thus becomes swappable: **OIDC → Intent** *or*
 **VC presentation → Intent**, with the payment-rail unchanged. See the

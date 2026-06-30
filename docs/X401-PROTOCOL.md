@@ -17,7 +17,7 @@ Status: working reference implementation — `packages/credentials`,
 x402 moves money but is identity-agnostic. Our **HAM** layer already binds *which
 human* approved an agent via a signed Intent — previously sourced from an **OIDC**
 login. x401 replaces that identity source with a **verifiable-credential
-presentation**: the verifier issues a `PROOF-REQUIRED` challenge carrying a DCQL
+presentation**: the verifier issues a `PROOF-REQUEST` challenge carrying a DCQL
 query (which claims it wants) and a **payment `transaction_data`** (what it wants
 authorized); the holder's wallet returns a `vp_token` (an SD-JWT-VC + key-binding
 JWT) that discloses **only the requested claims** and is bound to both the
@@ -37,9 +37,14 @@ answered by a selectively-disclosed, payment-bound credential.
 | **Agent** | `packages/agent` | Holds the payment wallet; pays via x402 with the issued Intent. |
 | **Merchant** | `packages/merchant` (`mandate-gate.ts`) | Verifies `Payment ⊆ Cart ⊆ Intent` + cap, then settles. **Unchanged** by x401. |
 
-`@proof.com/x401-node` provides only the wire format (challenge, VP Artifact,
-PROOF-REQUIRED/PRESENTATION headers, token exchange). It never verifies
-credentials and never drives the wallet — we supply both.
+`@proof.com/x401-node` provides only the wire format (the Digital Credentials
+request `credential_requirements.digital`, the Result Artifact, the
+PROOF-REQUEST/RESPONSE/RESULT headers, token exchange). The Verifier Challenge +
+encryptor that seal the payment binding into the nonce were dropped from the SDK
+in 0.2.0, so we vendor that primitive (`packages/credentials/src/x401-binding.ts`)
+and carry the challenge + vp_token inside the Result Artifact's (opaque)
+`credential_result.data`. The SDK never verifies credentials and never drives the
+wallet — we supply both.
 
 ---
 
@@ -49,7 +54,8 @@ credentials and never drives the wallet — we supply both.
 Phase A — identity + payment authorization (x401 + Proof + transaction_data)
  1. Verifier builds payment transaction_data (payment-mandate v1) from its own
     catalog price, and an x401 challenge with that payment's digest sealed in.
- 2. Verifier returns PROOF-REQUIRED { dcql/scope, challenge(nonce), oauth }.
+ 2. Verifier returns PROOF-REQUEST { credential_requirements.digital (dcql/scope
+    + challenge nonce), oauth }.
  3. Wallet selectively discloses the requested claims and signs a KB-JWT over
     the nonce → vp_token  (live: Proof hosted redirect; offline: in-browser).
  4. Verifier verifies: challenge (resource/method/expiry) + SD-JWT-VC (issuer

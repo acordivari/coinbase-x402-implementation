@@ -22,7 +22,7 @@ import {
 import {
   buildPaymentMandateTransactionData,
   buildProofIdDcqlQuery,
-  buildProofRequired,
+  buildProofRequest,
   createEncryptor,
   createIdentityChallenge,
   encodeTransactionData,
@@ -30,7 +30,7 @@ import {
   localVcVerifier,
   LocalVcIssuer,
   LocalWallet,
-  packPresentation,
+  packCredentialResult,
   PROOF_BASIC_SCOPE,
   PROOF_CREDENTIAL_ID,
   PROOF_ID_CLAIM_KEYS,
@@ -105,9 +105,9 @@ async function authorize(opts: {
   );
   const resource = `${VERIFIER_ID}/buy/${opts.sku}`;
   const challenge = await createIdentityChallenge({ encryptor, verifierId: VERIFIER_ID, resource, method: "GET", ttlSeconds: 600, transactionData: td });
-  const { payload } = buildProofRequired({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
+  const { payload } = buildProofRequest({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
   const present = await opts.wallet.present({ query: buildProofIdDcqlQuery(opts.requestedClaims), nonce: challenge.value, audience: VERIFIER_ID });
-  const { artifact } = packPresentation({ payload, agentId: opts.agentWallet, vpToken: present.vpToken });
+  const { artifact } = packCredentialResult({ payload, agentId: opts.agentWallet, vpToken: present.vpToken });
 
   const verifyTd = opts.tamperPayment
     ? encodeTransactionData(buildPaymentMandateTransactionData({ amount: "9999999", currency: "USDC", merchant: MERCHANT }))
@@ -192,9 +192,9 @@ describe("x401 → HAM → x402 (identity-bound agentic payment)", () => {
     const td = encodeTransactionData(buildPaymentMandateTransactionData({ amount, currency: "USDC", merchant: MERCHANT }));
     const resource = `${VERIFIER_ID}/buy/allergy-relief-24`;
     const challenge = await createIdentityChallenge({ encryptor, verifierId: VERIFIER_ID, resource, method: "GET", ttlSeconds: 600, transactionData: td });
-    const { payload } = buildProofRequired({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
+    const { payload } = buildProofRequest({ challenge, tokenEndpoint: `${VERIFIER_ID}/oauth/token`, scope: PROOF_BASIC_SCOPE });
     const present = await wallet.present({ query: buildProofIdDcqlQuery(["given_name"]), nonce: challenge.value, audience: VERIFIER_ID });
-    const { artifact } = packPresentation({ payload, agentId: signer.address, vpToken: present.vpToken });
+    const { artifact } = packCredentialResult({ payload, agentId: signer.address, vpToken: present.vpToken });
     const authorization = await verifyAuthorization({
       artifact, encryptor, vcVerifier,
       expectedVerifierId: VERIFIER_ID, expectedResource: resource, expectedMethod: "GET",

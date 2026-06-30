@@ -11,9 +11,10 @@ import {
   buildProofIdDcqlQuery,
   createEncryptor,
   createIdentityChallenge,
-  buildProofRequired,
+  buildProofRequest,
   detectRequirement,
-  packPresentation,
+  getRequestChallenge,
+  packCredentialResult,
   verifyAuthorization,
   encodeTransactionData,
   generateEs256Keys,
@@ -56,12 +57,12 @@ const txData = () =>
     }),
   );
 
-/** Build PROOF-REQUIRED, present from the wallet, return the PROOF-PRESENTATION header. */
+/** Build PROOF-REQUEST, present from the wallet, return the PROOF-RESPONSE header. */
 async function authorize(opts: {
   enc: ReturnType<typeof encryptor>;
   requested: string[];
   transactionData?: string;
-}): Promise<{ presentationHeader: string; payload: X401Payload; disclosed: string[]; withheld: string[]; missing: string[] }> {
+}): Promise<{ resultHeader: string; payload: X401Payload; disclosed: string[]; withheld: string[]; missing: string[] }> {
   const challenge = await createIdentityChallenge({
     encryptor: opts.enc,
     verifierId: VERIFIER_ID,
@@ -70,25 +71,25 @@ async function authorize(opts: {
     ttlSeconds: 600,
     ...(opts.transactionData !== undefined ? { transactionData: opts.transactionData } : {}),
   });
-  const { payload, header } = buildProofRequired({
+  const { payload, header } = buildProofRequest({
     challenge,
     tokenEndpoint: TOKEN_ENDPOINT,
     scope: "urn:proof:params:scope:verifiable-credentials:basic",
     requestId: "proof-id-v1",
   });
-  const detected = detectRequirement({ "PROOF-REQUIRED": header });
+  const detected = detectRequirement({ "PROOF-REQUEST": header });
   expect(detected).toBeTruthy();
   const present = await wallet.present({
     query: buildProofIdDcqlQuery(opts.requested),
-    nonce: detected!.payload.proof.challenge.value,
+    nonce: getRequestChallenge(detected!.payload).value,
     audience: VERIFIER_ID,
   });
-  const { header: presentationHeader } = packPresentation({
+  const { header: resultHeader } = packCredentialResult({
     payload,
     agentId: "did:web:agent.sandbox.local",
     vpToken: present.vpToken,
   });
-  return { presentationHeader, payload, ...present };
+  return { resultHeader, payload, ...present };
 }
 
 beforeAll(async () => {
@@ -123,9 +124,9 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
   it("verifies a valid presentation bound to the payment", async () => {
     const enc = encryptor();
     const td = txData();
-    const { presentationHeader } = await authorize({ enc, requested: ["given_name", "family_name", "age_over_21"], transactionData: td });
+    const { resultHeader } = await authorize({ enc, requested: ["given_name", "family_name", "age_over_21"], transactionData: td });
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: enc,
       vcVerifier,
       expectedVerifierId: VERIFIER_ID,
@@ -145,12 +146,12 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
 
   it("rejects when the payment is tampered (transaction_data binding broken)", async () => {
     const enc = encryptor();
-    const { presentationHeader } = await authorize({ enc, requested: ["given_name"], transactionData: txData() });
+    const { resultHeader } = await authorize({ enc, requested: ["given_name"], transactionData: txData() });
     const tamperedTd = encodeTransactionData(
       buildPaymentMandateTransactionData({ amount: "9900000", currency: "USDC", merchant: "0xc0ffee0000000000000000000000000000000000" }),
     );
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: enc,
       vcVerifier,
       expectedVerifierId: VERIFIER_ID,
@@ -165,9 +166,9 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
 
   it("rejects when a DCQL-required claim was not disclosed", async () => {
     const enc = encryptor();
-    const { presentationHeader } = await authorize({ enc, requested: ["given_name"] });
+    const { resultHeader } = await authorize({ enc, requested: ["given_name"] });
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: enc,
       vcVerifier,
       expectedVerifierId: VERIFIER_ID,
@@ -181,9 +182,9 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
 
   it("rejects a challenge replayed against a different resource", async () => {
     const enc = encryptor();
-    const { presentationHeader } = await authorize({ enc, requested: ["given_name"] });
+    const { resultHeader } = await authorize({ enc, requested: ["given_name"] });
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: enc,
       vcVerifier,
       expectedVerifierId: VERIFIER_ID,
@@ -196,9 +197,9 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
   });
 
   it("rejects a presentation verified under a different challenge encryptor", async () => {
-    const { presentationHeader } = await authorize({ enc: encryptor(), requested: ["given_name"] });
+    const { resultHeader } = await authorize({ enc: encryptor(), requested: ["given_name"] });
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: createEncryptor({ key: "a-totally-different-secret-key", purpose: "x401-test" }),
       vcVerifier,
       expectedVerifierId: VERIFIER_ID,
@@ -211,13 +212,13 @@ describe("verifyAuthorization (x401 challenge + VC + payment binding)", () => {
 
   it("rejects a credential from an untrusted issuer", async () => {
     const enc = encryptor();
-    const { presentationHeader } = await authorize({ enc, requested: ["given_name"] });
+    const { resultHeader } = await authorize({ enc, requested: ["given_name"] });
     const strangerVerifier = localVcVerifier({
       issuerId: "https://evil.example.com",
       issuerPublicJwk: issuerKeys.publicJwk,
     });
     const v = await verifyAuthorization({
-      presentationHeader,
+      resultHeader,
       encryptor: enc,
       vcVerifier: strangerVerifier,
       expectedVerifierId: VERIFIER_ID,
